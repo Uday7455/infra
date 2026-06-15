@@ -1,0 +1,92 @@
+"""
+an-server-profile-summary web component definition
+"""
+from typing import List
+
+from selenium.webdriver.remote.webelement import WebElement
+
+from qali.intersight.gui import util
+from qali.intersight.gui.model_util import ChildComponentsInfo, DataContextMap, DataDictContextList
+from qali.intersight.gui.web_component import WebComponent
+
+
+class AnServerProfileSummary(WebComponent):
+    """
+        an-server-profile-summary web component class definition
+
+        url: https://staging.starshipcloud.com/an/infrastructure-service/an/policy/profiles/server/
+             monitor page
+    """
+
+    @property
+    def path_contexts(self) -> List[str]:
+        """
+            return path contexts of the web components
+
+            :return: return path contexts of the web components.
+        """
+        if self._path_contexts is None:
+            # label = self.web_element.get_attribute('label')
+            label_element = self.shadow_root_element(self.web_element, "ucs-expand")
+            self._path_contexts = []
+            if label_element:
+                label = label_element.get_attribute('label')
+                if label:
+                    self._path_contexts.append(label)
+        return self._path_contexts
+
+    @property
+    def data_context(self) -> DataContextMap:
+        """
+            return available data context
+            :return: data context dictionary.
+        """
+        if self._data_context is None:
+            self._data_context = {self.path_contexts[0]: {self.parent_context:
+                                                          DataDictContextList(common_info=self.common_info)}}
+        return self._data_context
+
+    def handle_child_components(self, element: WebElement) -> ChildComponentsInfo:
+        """
+        Handle child components of the given element.
+
+        :param element: The WebElement to handle.
+        :return: ChildComponentsInfo object containing information about child components.
+        """
+
+        child_components = ChildComponentsInfo([])
+        all_child_elements = set(util.get_child_shadow_host_elements(self.driver, element))
+        general_expand = self.shadow_root_element(self.web_element, "ucs-expand.general-expand")
+
+        # Get components that are in the general-expand
+        expand_content_components = set()
+        if general_expand:
+            # Label from ucs-expand to use as path context
+            expand_label = general_expand.get_attribute('label')
+            expand_content_components = util.get_child_shadow_elements(self.driver, general_expand)
+            if expand_content_components:
+                child_components.add(expand_content_components, path_contexts=[expand_label])
+
+        # Get selected tab text if available
+        tabs = self.shadow_root_element(element, 'ucs-tabs')
+        selected_tab_text = self.get_text(self.shadow_root_element(tabs, 'div.selected'))
+
+        # Get components that are in tab content area
+        tab_content_components = set()
+        tabs_content_div = self.shadow_root_element(self.web_element, "div.tabs-content")
+        if tabs_content_div:
+            # Use get_child_shadow_elements instead since tabs_content_div is not a shadow host
+            tab_content_components = set(util.get_child_shadow_elements(self.driver, tabs_content_div))
+
+        # Add child components with appropriate path context
+        for child in all_child_elements:
+            if child.tag_name == "ucs-tabs":
+                # Don't add path context for tabs themselves
+                child_components.add([child])
+            elif child in tab_content_components and selected_tab_text:
+                # Add tab context only for components inside tab content
+                child_components.add([child], path_contexts=[selected_tab_text])
+            else:
+                child_components.add([child])
+
+        return child_components
