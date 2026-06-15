@@ -1,0 +1,85 @@
+"""
+an-server-profile-errors web component definition
+"""
+import re
+from typing import Any, Mapping, List
+from selenium.webdriver.common.by import By
+from selenium.common.exceptions import NoSuchElementException
+from qali.intersight.gui.web_component import WebComponent
+from qali.intersight.gui.model_util import DataContextMap, DataDictContext
+from qali.intersight.gui.web_component.ucs_icon import UcsIcon
+
+class AnServerProfileErrorsDataContext(DataDictContext):
+    """
+    DataContext for an-server-profile-errors
+    Extracts error/warning messages and their icon types.
+    """
+
+    def values(self, timeout: int) -> Mapping[str, Any]:
+        """
+        Extract and return data from error/warning section.
+        :param timeout: time to wait for web element to be ready
+        :return: {icon_type: [messages]}
+        """
+        element = self.actual_element
+        rtr_map = {}
+
+        error_list = self.shadow_root_element(element, "div.error-list")
+        if not error_list:
+            return rtr_map
+
+        error_items = error_list.find_elements(By.CSS_SELECTOR, "div.li-item")
+        for item in error_items:
+            try:
+                icon_elem = item.find_element(By.CSS_SELECTOR, "ucs-icon")
+                icon_type=UcsIcon.icon_name(icon_elem)
+                message = self.get_text(item).strip()
+
+                if icon_type not in rtr_map:
+                    rtr_map[icon_type] = []
+                rtr_map[icon_type].append(message)
+            except NoSuchElementException:
+                continue
+
+        return rtr_map
+
+
+class AnServerProfileErrors(WebComponent):
+    """
+    an-server-profile-errors component
+    Provides error/warning summary as data context
+    """
+
+    def __init__(self,
+                 driver,
+                 web_element,
+                 css_paths,
+                 context_paths,
+                 common_info):
+        super().__init__(driver, web_element, css_paths, context_paths, common_info)
+        self._data_context = None
+    
+    def custom_parent_context(self, context_paths) -> List[str]:
+        """
+        Static path context for this component.
+        Used for organizing it under a meaningful label.
+        """
+        data = context_paths
+        tab_name = re.sub(r'\s*\(\d+\)', '', data[1])
+        path_context = (data[0], tab_name)
+        return path_context
+
+    @property
+    def data_context(self) -> DataContextMap:
+        """
+        Register available data contexts under this component.
+        """
+        if self._data_context is None:
+            self._data_context = {
+                "Server Profile Errors": {
+                    self.parent_context : AnServerProfileErrorsDataContext(
+                        self.web_element, common_info=self.common_info
+                    )
+                }
+            }
+        return self._data_context
