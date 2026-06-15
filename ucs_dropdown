@@ -1,0 +1,152 @@
+"""
+ucs-dropdown-menu web component definition
+"""
+import time
+from typing import List, Union
+from selenium.webdriver.common.by import By
+from selenium.webdriver.remote.webdriver import WebDriver
+from selenium.webdriver.remote.webelement import WebElement
+from qali.intersight.gui.exceptions import ValueNotSet
+from qali.intersight.gui.exceptions import ValueNotFound
+from qali.intersight.gui.web_component import WebComponent
+from qali.intersight.gui.web_component import ContextPath
+from qali.intersight.gui import util
+from qali.intersight.gui.model_util import SelectContext
+from qali.intersight.gui.model_util import SelectContextMap
+from qali.intersight.gui.model_util import CommonInfo
+
+
+class UcsDropdownContext(SelectContext):
+    """
+        ucs-dropdown select context class definition
+
+        url: https://staging.starshipcloud.com/an/infrastructure-service/an/policy/policies/boot-precision-policy/create
+             create page with Action button.
+    """
+
+    def get_choice_text(self, choice: WebElement) -> str:
+        """
+            return text for desired choice element
+            :param choice: choice element to get text from
+            :return: text for desired choice element.
+        """
+
+        return util.get_element_text_content(self.driver, choice)
+
+    def select(self, value: str, timeout: int, backward_compatible: bool = True) -> None:
+        """
+            select value of the context
+
+            :param value: value to be selected
+            :param timeout: time to wait for the web element to be ready
+            :param backward_compatible: backward compatibility should be consider or not.
+
+            :return None
+        """
+        element = self.actual_element
+
+        # click the preceding-sibling ucs-button first
+        if element.get_attribute("opened") is None:
+            ucs_button = element.find_element(
+                By.XPATH, "./preceding-sibling::ucs-button")
+            self.click_element(ucs_button, timeout)
+
+        select_elements = []
+        wait_time_gen = util.wait_time.generator(self.START_WAIT_TIME,
+                                                 self.MAX_INTERVAL_TIME,
+                                                 timeout)
+        error = None
+        found = False
+
+        for i in wait_time_gen:
+            choice_list = []
+            try:
+                choices = element.find_elements(By.CSS_SELECTOR, "ucs-dropdown-option")
+                for choice_text, choice in self.choices_generator(choices,
+                                                                  backward_compatible):
+                    choice_list.append(choice_text)
+                    if choice_text == value:
+                        found = True
+                        select_elements.append(choice)
+                        break
+                if found:
+                    break
+                raise ValueNotSet(f'Unable to find drop down item {value}. Available drop down items are {choice_list}')
+            except ValueNotSet as err:
+                error = err
+                time.sleep(i)
+        else:
+            raise error
+
+        for select_element in select_elements:
+            self.click_element(select_element, timeout)
+
+    def choices(self, enabled: Union[bool, None], timeout: int, backward_compatible: bool = True) -> List[str]:
+        """
+            return selection choices
+
+            :param enabled: if None, return all choices.  If True, return enabled choice only.  If False,
+                            return disabled choice only.
+            :param timeout: time to wait for the web element to be ready
+            :param backward_compatible: backward compatibility should be consider or not.
+
+            :return list of choices for selection
+        """
+        if enabled is False:
+            return []
+
+        element = self.actual_element
+
+        wait_time_gen = util.wait_time.generator(self.START_WAIT_TIME,
+                                                 self.MAX_INTERVAL_TIME,
+                                                 timeout)
+        for i in wait_time_gen:
+            choices = element.find_elements(
+                By.CSS_SELECTOR, "ucs-dropdown-option")
+            if choices:
+                break
+            time.sleep(i)
+        else:
+            raise ValueNotFound("Unable to find any available choices")
+
+        return list(map(lambda x: x[0], self.choices_generator(choices, backward_compatible)))
+
+
+class UcsDropdownMenu(WebComponent):
+    """
+        ucs-dropdown-pro-max web component class definition
+    """
+
+    def __init__(self,
+                 driver: WebDriver,
+                 web_element: WebElement,
+                 css_paths: List[str],
+                 context_paths: ContextPath,
+                 common_info: CommonInfo) -> None:
+        """
+            init function of the web component
+            :param driver: selenium web driver
+            :param web_element: shadow host web element.
+            :param css_paths: css path to reach this shadow host web element.
+            :param context_paths: context paths callable for this web eleemnt.
+            :param common_info: common information shared between components.
+            :return: None
+        """
+        super().__init__(
+            driver, web_element, css_paths, context_paths, common_info)
+        self.shadow_leaf = True
+        self.html_leaf = True
+
+    @property
+    def select_context(self) -> SelectContextMap:
+        """
+            return available select context
+            :return: select context dictionary.
+        """
+        if self._select_context is None:
+            # find the preceding-sibling::ucs-button
+            context = self.web_element.find_element(By.XPATH, './preceding-sibling::ucs-button').text
+            self._select_context = {
+                context: {self.parent_context: UcsDropdownContext(self.web_element,
+                                                                  common_info=self.common_info)}}
+        return self._select_context
