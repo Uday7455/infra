@@ -1,0 +1,43 @@
+"""
+ucs-dashboard-drawers web component definition
+"""
+from selenium.webdriver.remote.webelement import WebElement
+from qali.intersight.gui.web_component import WebComponent
+
+from qali.intersight.gui.model_util import ChildComponentsInfo
+
+
+class UcsDashboardDrawers(WebComponent):
+    """
+        ucs-dashboard-drawers web component class definition
+
+        url: https://staging.starshipcloud.com/an/mydashboard/an/dashboard
+             monitor page
+    """
+
+    def handle_child_components(self, element: WebElement) -> ChildComponentsInfo:
+        """
+            custom child components information to component manager.
+
+            :param element: reference web element          
+            :return: custom child components information
+        """
+
+        # when drawer exist, drawer will be on top of everything.  So just need to process
+        # drawers.  Otherwise, we process all the shadow elements include drawers, but drawer will be empty.
+        drawer_elements = self.shadow_root_elements(element, "ucs-dashboard-edit-drawer[showdrawer]")
+
+        if drawer_elements:
+            return ChildComponentsInfo(drawer_elements, replace_require=True)
+
+        drawer_elements = self.shadow_root_elements(element, "ucs-dashboard-dashlet-drawer[showdrawer]")
+        if drawer_elements:
+            return ChildComponentsInfo(drawer_elements, replace_require=True)
+
+        metrics_drawer_element = self.shadow_root_element(element, "ucs-metrics-details-drawer")
+        if metrics_drawer_element:
+            drawer_elements = self.shadow_root_elements(metrics_drawer_element, 'ucs-drawer[opened]')
+            if drawer_elements:
+                return ChildComponentsInfo(drawer_elements, replace_require=True)
+
+        return ChildComponentsInfo([])
