@@ -1,0 +1,620 @@
+"""
+an-topology-explorer web component definition
+"""
+import time
+from typing import Callable, Mapping, Optional, Tuple, Union
+
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.actions import interaction
+from selenium.webdriver.common.actions.action_builder import ActionBuilder
+from selenium.webdriver.common.actions.pointer_input import PointerInput
+from selenium.webdriver.common.by import By
+
+from qali.intersight.gui import util
+from qali.intersight.gui.exceptions import ContextNotFound, ValueNotFound
+from qali.intersight.gui.model_util import CanvasContext, CanvasContextMap, CommonInfo, DataContextMap, DataDictContext
+from qali.intersight.gui.web_component import WebComponent
+from qali.intersight.gui.web_component.an_topology_alarms import AnTopologyAlarmsDataContext
+from qali.intersight.gui.web_component.ucs_tooltip import UcsTooltipTopologyContext
+
+
+class AnTopologyCanvasContext(CanvasContext):
+    """
+        TopologyCanvasContext - cover interactions with topology workspace and canvas
+    """
+    CONTEXT_WAIT_TIME = 10
+
+    def __init__(self,
+                 element: WebComponent,
+                 element_func: Callable = None,
+                 common_info: CommonInfo = None):
+        """
+            constructor of context base class
+
+            :param element: web element for the context
+            :param element_func: element callback to get actual element for interaction
+            :param common_info:  common information shared to the context
+
+            :return None
+        """
+        super().__init__(element, element_func, common_info)
+        self._application = None
+
+    # properties
+    @property
+    def application(self) -> Mapping[str, Union[int, float]]:
+        """
+            return an-topology web element (topology application)
+
+            :return: an-topology web element
+        """
+
+        topology = self.shadow_root_element(self.element, "an-topology.topology.sub")
+        if not topology:
+            topology = self.shadow_root_element(self.element, "an-topology.topology.main")
+        return topology
+
+    @property
+    def workspace(self) -> WebComponent:
+        """
+            return an-topology-explorer web element
+
+            :return: an-topology-explorere web element
+        """
+        return self.element
+
+    # toolbar actions
+    def zoom_out(self) -> bool:
+        """
+            click zoom out once if it is not disabled
+            :return: return True if zoom_out is clicked
+        """
+        element = self.shadow_root_element(self.workspace, "ucs-button[icon='ucs:isnd-minus']")
+        if element.get_attribute("disabled") is None:
+            self.click_element(element, self.CONTEXT_WAIT_TIME)
+            return True
+        return False
+
+    def zoom_in(self) -> bool:
+        """
+            click zoom in once if it is not disabled
+            :return: return True if zoom_out is clicked
+        """
+        element = self.shadow_root_element(self.workspace, "ucs-button[icon='ucs:isnd-plus']")
+
+        if element.get_attribute("disabled") is None:
+            self.click_element(element, self.CONTEXT_WAIT_TIME)
+            return True
+        return False
+
+    def enable_full_screen(self) -> bool:
+        """
+            click fullScreen action once if it is not disabled
+            :return: return True if fullScreen is clicked
+        """
+        element = self.shadow_root_element(self.workspace, "ucs-button[icon='ucs:isnd-maximize']")
+        if element.get_attribute("disabled") is None:
+            self.click_element(element, self.CONTEXT_WAIT_TIME)
+            return True
+        return False
+
+    def disable_full_screen(self) -> bool:
+        """
+            click fullScreen action once if it is not disabled
+            :return: return True if fullScreen is clicked
+        """
+        element = self.shadow_root_element(self.workspace, "ucs-button[icon='ucs:isnd-minimize']")
+        if element.get_attribute("disabled") is None:
+            self.click_element(element, self.CONTEXT_WAIT_TIME)
+            return True
+        return False
+    
+    def click_on_legend(self):
+        """
+            click legend details once if it is not disabled
+            :return: return True if legend details is clicked
+        """
+        element = self.shadow_root_element(self.workspace, "ucs-button[icon='ucs:isnd-info-o']")
+        if element.get_attribute("disabled") is None:
+            self.click_element(element, self.CONTEXT_WAIT_TIME)
+            return True
+        return False
+
+    def search_node(self, name: str):
+        """
+            1) open search dropdown once if it is not disabled
+            2) search by device name
+            3) select device to center it on workspace - optional
+            :return: return True if device is selected
+        """
+        # element = self.shadow_root_element(self.workspace, "ucs-button[icon='ucs:isnd-search']")
+        # if element.get_attribute("disabled") is None:
+        #     self.click_element(element, self.CONTEXT_WAIT_TIME)
+        #     element = self.shadow_root_element(self.element, "ucs-dropdown-pro-max")
+        #     return True
+        self.common_info.log(
+            'This method is not supported because there is no support for ucs-dropdown-group for ucs-dropdown-menu yet.'
+        )
+        return False
+
+    # base interactions methods
+    def select_node(self, node_id: str):
+        """
+            select node by id
+            :return: return True if device is selected
+        """
+        node_id = self._javascript_attr(self.application, f"findElement('{node_id}')?.id")
+        if not node_id:
+            raise ContextNotFound(f"Unable to find node name {node_id}.")
+        self._move_pointer_to_node(node_id)
+        ActionChains(self.driver).click().perform()
+        return True
+
+    def expand_node(self, node: str = None, expand=True) -> bool:
+        """
+            expand given node from canvas
+
+            :param node: name of group to expand
+            :param expand: expand or collapse node
+            :return: return True if action is taken to expand or collapse
+        """
+        result = False
+        if expand:
+            result = self._javascript_attr(self.application,
+                                           f"expandServerGroup('{node}', true)")
+        else:
+            result = self._javascript_attr(self.application,
+                                           f"collapseServerGroup('{node}', true)")
+        return bool(result)
+
+    def get_node_details(self, node_id: str):
+        """
+            show node details by hover over on it
+
+            :param node_id: node id to display details
+            :param timeout: time to wait for element to be ready.
+        """
+        self._close_tooltip()
+        self._open_node_tooltip(node_id, 'details')
+        tool_tip = self.get_popover()
+        tool_tip_ctx = UcsTooltipTopologyContext(tool_tip, common_info=self.common_info)
+        data = tool_tip_ctx.values(self.CONTEXT_WAIT_TIME)
+        self._close_tooltip()
+        return data
+
+    def get_node_alarms(self, node_id, timeout: Optional[int] = 0):
+        """
+            Retrieves alarms associated with a specific node.
+            :param node_id: The ID of the node
+            :param timeout: time to wait for element to be ready.
+        """
+
+        self._open_node_tooltip(node_id, 'alarm')
+        tool_tip = self.get_popover()
+        renderer = util.get_shadow_root_element(self.driver, tool_tip, 'ucs-renderer')
+        topo_alarm = util.get_shadow_root_element(self.driver, renderer, 'an-topology-alarms')
+        topo_alarm_data_ctx = AnTopologyAlarmsDataContext(topo_alarm, common_info=self.common_info)
+        alarm_data = topo_alarm_data_ctx.values(timeout)
+        self._close_tooltip()
+        return alarm_data 
+
+    def _open_node_tooltip(self, node_id, target='details'):
+        """
+            Opens the tooltip for a specified node in the topology.
+            :param node_id: The ID of the node for which the tooltip should be opened
+            :param target: The type of tooltip to open
+        """
+        # Ports/blades do not have alarms or a details icon, so there's no need to modify the node_id
+        if not node_id.startswith(('ether_PhysicalPort', 'compute_Blade','network_SecureRouter')):
+            if target == 'details':
+                node_id += '-info'
+            elif target == 'alarm':
+                node_id += '-health'
+        self._move_pointer_to_node(node_id)
+        wait_time_gen = util.wait_time.generator(self.START_WAIT_TIME,
+                                                 self.MAX_INTERVAL_TIME,
+                                                 self.CONTEXT_WAIT_TIME) 
+        for i in wait_time_gen:
+            if self.get_popover():
+                break
+            time.sleep(i)
+        else:
+            raise ValueNotFound(f'Unable to find popover for device: {node_id}')
+
+    def go_to_topology(self, moid: Optional[str], node_id: Optional[str]):
+        """
+            go to the topology by device moid (node)
+
+            :param moid: node moid
+            :param node_id: node ID
+        """
+        self._close_tooltip()
+        if not node_id:
+            node_id = self.get_node_id({"value": moid, "dataPath": "meta.Moid"})
+        self._open_node_tooltip(node_id)
+        popover = self.get_popover()
+        renderer = self.shadow_root_element(popover, "ucs-renderer")
+        go_to_topology_btn = self.shadow_root_element(renderer, "ucs-button[label='View Topology']")
+        if go_to_topology_btn and go_to_topology_btn.get_attribute("disabled") is None:
+            self.click_element(go_to_topology_btn, self.CONTEXT_WAIT_TIME)
+        else:
+            raise ValueNotFound(f"Can't drill down to topology:  {moid}")
+    
+    def click_on_tooltip(self, moid: Optional[str], node_id: Optional[str], button_label: Optional[str]):
+        """
+            click on the given button_label in the tooltip 
+
+            :param moid: node moid
+            :param node_id: node ID
+            :param button_label: label returned from get_tooltip_choices
+        """
+        self._close_tooltip()
+        if not node_id:
+            node_id = self.get_node_id({"value": moid, "dataPath": "meta.Moid"})
+
+        self._open_node_tooltip(node_id)
+        popover = self.get_popover()
+        time.sleep(1)  # ensure popover is fully loaded
+        renderer = self.shadow_root_element(popover, "ucs-renderer")
+
+        target_element = None
+
+        # Case 1: keyval label ("Key: Value")
+        if ": " in button_label:
+            keyval_divs = self.shadow_root_elements(renderer, ".keyval")
+            for kv in keyval_divs:
+                text = kv.text.replace("\n", ": ").strip()
+                if text == button_label:
+                    # Find the actual clickable element inside this keyval
+                    inner_btns = kv.find_elements(By.CSS_SELECTOR, "ucs-switcher, ucs-renderer")
+                    # server profile link is inside ucs-renderer
+                    if inner_btns and inner_btns[0].tag_name == 'ucs-renderer':
+                        target_element = self.shadow_root_element(inner_btns[0], 'ucs-link')
+                    elif inner_btns:
+                        target_element = inner_btns[0]
+                    break
+
+        # Case 2: normal buttons/titles
+        else:
+            clickable_elements = self.shadow_root_elements(renderer, "ucs-button, .title")
+            for element in clickable_elements:
+                if self.get_text(element) == button_label:
+                    target_element = element
+                    break
+
+        # Case 3: No match found
+        if target_element:
+            if target_element.get_attribute("disabled") is None:
+                self.click_element(target_element, self.CONTEXT_WAIT_TIME)
+            else:
+                raise Exception(f"The element with text '{button_label}' was found but is disabled.")
+        else:
+            raise ValueError(f"Could not find a clickable element with text '{button_label}' in the tooltip.")
+
+        
+    def get_tooltip_choices(self, moid: Optional[str], node_id: Optional[str], timeout: Optional[int] = None):
+        """
+            get tooltip click choices by device moid (node)
+
+            :param moid: node moid
+            :param node_id: node ID
+        """
+        self._close_tooltip()  
+        if not node_id:
+            node_id = self.get_node_id({"value": moid, "dataPath": "meta.Moid"})
+        self._open_node_tooltip(node_id)
+        popover = self.get_popover()
+        time.sleep(1) # to make sure the popover is fully loaded
+        renderer = self.shadow_root_element(popover, "ucs-renderer")
+        rtr =[]
+        # unified edge has title which is not a button
+        click_buttons = self.shadow_root_elements(renderer, "ucs-button, .title")
+
+        # get all .keyval > ucs-switcher / ucs-renderer buttons
+        keyval_buttons = self.shadow_root_elements(renderer, ".keyval > ucs-switcher, .keyval > ucs-renderer")
+
+        # collect matching label texts
+        for btn in keyval_buttons:
+            parent = btn.find_element(By.XPATH, "./ancestor::div[contains(@class,'keyval')]")
+            rtr.append(parent.text.replace("\n", ": "))
+
+        for click_button in click_buttons:
+            if click_button.get_attribute("disabled") is None:
+                rtr.append(self.get_text(click_button))
+        self._close_tooltip()
+        return rtr  
+
+    def navigate_by_breadcrumbs(self, name: str):
+        """
+            go to the topology by device name through the breadcrubms
+
+            :param name: device name
+        """
+        breadcrumbs_el = self._get_breadcrumbs()
+        breadcrumbs = self.shadow_root_elements(breadcrumbs_el, 'span.crumbs-content, div.crumbs-content')
+        for breadcrumb in breadcrumbs:
+            if name in breadcrumb.text:
+                self.click_element(breadcrumb, self.CONTEXT_WAIT_TIME)
+                self.is_app_mounted()
+                self.common_info.log(f'Navigating through the breadcrumbs (name: {name}) was successful')
+                return True
+        raise ValueNotFound(f"Navigation item not found in the breadcrumbs: {name}")
+
+    def is_app_mounted(self):
+        """
+            whether application mounted or not
+
+            :param node: node name
+            :return: return True if application has been mounted
+        """
+        wait_time_gen = util.wait_time.generator(self.START_WAIT_TIME,
+                                                 self.MAX_INTERVAL_TIME,
+                                                 self.CONTEXT_WAIT_TIME)
+        mounted_status = False
+        for i in wait_time_gen:
+            if mounted_status:
+                break
+            loader = self.shadow_root_element(self.workspace, 'ucs-icon.loader')
+            if loader:
+                for i in wait_time_gen:
+                    mounted_status = not self.shadow_root_element(self.workspace, 'ucs-icon.loader')
+                    if mounted_status:
+                        break
+                    time.sleep(i)
+                else:
+                    raise ContextNotFound("Application isn't mounted yet...")
+            time.sleep(i)
+
+        self.common_info.log('Application is mounted')
+        return mounted_status
+
+    def get_popover(self) -> WebComponent:
+        """
+            get popover web element
+
+            :return: return popover web element
+        """
+        wait_time_gen = util.wait_time.generator(self.START_WAIT_TIME,
+                                                 self.MAX_INTERVAL_TIME,
+                                                 self.CONTEXT_WAIT_TIME)
+
+        for i in wait_time_gen:
+            popover = self.driver.execute_script('return document.querySelector("body > ucs-tooltip")')
+            if popover:
+                break
+            time.sleep(i)
+        else:
+            raise ValueNotFound("Unable to find popover")
+
+        return popover
+
+    def _get_breadcrumbs(self):
+        return self.shadow_root_element(self.workspace, "ucs-breadcrumbs")
+
+    def _close_tooltip(self):
+        """
+            Method to close the tooltip by moving the mouse to topology breadcrumb
+        """
+        action_chain = ActionChains(self.driver)
+        action_chain.move_to_element(self._get_breadcrumbs()).perform()
+        time.sleep(1) # for the tooltip to close reliably
+
+    # data related methods
+    def get_node_id(self, config):
+        """
+            get node id by config
+
+            :param config: data config
+            :return: node id
+        """
+        node_id = self._javascript_attr(self.application, f"_findNodeByConfig({config})?.id")
+        if node_id:
+            return node_id
+        raise ValueNotFound(f"Unable to find node id by value: {config.get('value', None)}")
+
+    def get_breadcrumbs_data(self):
+        """
+            get breadcrumbs data from workspace header
+
+            :return: breadcrumbs data values
+        """
+        breadcrumbs = self._get_breadcrumbs()
+        if breadcrumbs:
+            # CHECK: tried to do that by the data_ctx
+            # return breadcrumbs.data_ctx().values()
+            items = self._javascript_attr(breadcrumbs, "items")
+            self.common_info.log(f'Current breadcrumbs: {items}')
+            return items
+        raise ValueNotFound("Unable to find breadcrumbs")
+
+    def get_node_coordinates(self, node_id: str):
+        """
+            get node coordinates by name
+
+            :param node_id: node id
+            :return: coordinates in format: { x: float, y: float }
+        """
+        node_rect = self._javascript_attr(self.application,
+                                          f"application.body.findElement('{node_id}').bounds")
+        x_offset = node_rect['x'] + node_rect['width'] // 2
+        y_offset = node_rect['y'] + node_rect['height'] // 2
+        return {"x": x_offset, "y": y_offset}
+
+    def _move_pointer_to_node(self, node_id: str) -> None:
+        """
+            Move the mouse to the center of a topology node.
+
+            Canvas coordinates are relative to the application top-left. Selenium's
+            move_to_element_with_offset uses the element center, so we move via viewport.
+        """
+        coords = self.get_node_coordinates(node_id)
+        viewport = self.driver.execute_script(
+            '''
+            const rect = arguments[0].getBoundingClientRect();
+            return {x: Math.round(rect.left + arguments[1]), y: Math.round(rect.top + arguments[2])};
+            ''',
+            self.application,
+            coords['x'],
+            coords['y'],
+        )
+        mouse = PointerInput(interaction.POINTER_MOUSE, "mouse")
+        actions = ActionBuilder(self.driver, mouse=mouse)
+        actions.pointer_action.move_to_location(viewport['x'], viewport['y'])
+        actions.perform()
+
+    def _wait_for_topology_ready(self, timeout: Optional[int] = 0) -> bool:
+        """
+            wait for topology to be ready
+
+            :param timeout: time to wait for element to be ready.
+            :return: return True if topology is ready
+        """
+        wait_time_gen = util.wait_time.generator(self.START_WAIT_TIME,
+                                                 self.MAX_INTERVAL_TIME,
+                                                 timeout or self.CONTEXT_WAIT_TIME)
+        for i in wait_time_gen:
+            is_loading = self.element.find_elements(By.CSS_SELECTOR, "ucs-loader")
+            if not is_loading:
+                time.sleep(2) # wait for topology to be fully loaded
+                return True
+            time.sleep(i)
+        
+        raise ContextNotFound("Topology isn't ready yet")      
+
+    def nodes_info(self, show_child = False, timeout: Optional[int] = 0) -> Mapping[str, Tuple[str, Mapping[str, Union[int, float]]]]:
+        self._wait_for_topology_ready(timeout)
+        nodes_info = self._javascript_attr(self.application, "_nodes")
+        # node_type_map = {
+        #     "network.Element": "Fabric Interconnects",
+        #     "equipment.Chassis": "Chassis",
+        #     "equipment.Fex": "Fabric Extender",
+        #     "equipment.IoCard": 'IOM',
+        #     "compute.RackUnit": "Rack Server",
+        #     "server.group": "Group of Servers"
+        # }
+        rtr_list_nodes_info = [] 
+        for node in nodes_info:
+            # fetch blade node info inside a chassis
+            if show_child and node.get('type') == 'equipment.Chassis':
+                for child in node.get('children', []):
+                    if child.get('type') == 'compute.Blade':
+                        nodes_info.append(child)
+            health = ''
+            moid = ''
+            if node.get('meta', {}):
+                health = node.get('meta', {}).get('AlarmSummary', {}).get('Health', '')
+                moid = node.get('meta', {}).get('Moid', None)
+            this_node_info = {
+                'id': node.get('id', None),
+                'name': node.get('name', None),
+                'model': node.get('model', None),
+                'type': node.get('type', None),
+                'moid': moid,
+                'health': health
+            }
+            rtr_list_nodes_info.append(this_node_info)
+        return rtr_list_nodes_info
+    
+    def ports_info(self, node_id: str, timeout: Optional[int] = 0) -> Mapping[str, Tuple[str, Mapping[str, Union[int, float]]]]:
+        """
+            get ports info by node id
+        """
+        port_details = self._javascript_attr(self.application,
+                                          f"application.body.findElement('{node_id}').children[0].component._properties._children")
+        rtr_list_ports_info = []
+        for port in port_details:
+            this_port_info = {
+                'id': port.get('id', None),
+                'name': port.get('name', None),
+                'type': port.get('type', None),
+                'moid': port.get('meta', {}).get('Moid', None)
+    
+            }
+            rtr_list_ports_info.append(this_port_info)
+        return rtr_list_ports_info   
+
+    def _build_edge_info(self, edges_info):
+        if edges_info:
+            rtr_list_edges_info = []
+            for edge_info in edges_info:
+                this_edge_info = {
+                    'id': edge_info.get('id', None),
+                    'status': edge_info.get('status', None),
+                    'from': edge_info.get('from', None),
+                    'fromPlug': edge_info.get('fromPlug', None),
+                    'to': edge_info.get('to', None),
+                    'toPlug': edge_info.get('toPlug', None),
+                    'connections': self._build_edge_info(edge_info.get('connections', []))
+                }
+                rtr_list_edges_info.append(this_edge_info)
+            return rtr_list_edges_info
+        return []
+
+    def edges_info(self) -> Mapping[str, Tuple[str, Mapping[str, Union[int, float]]]]:
+        edges_info = self.driver.execute_script(
+            "return window.Ucs.Utils.cloneDeep(arguments[0]._edges)", self.application)
+        rlt = self._build_edge_info(edges_info)
+        return rlt
+
+class BandwidthDataContext(DataDictContext):
+    """
+        topology network utilization bandwidth data context
+    """
+
+    def values(self, timeout: int):
+        """
+            return data in data context
+
+            :param timeout: time to wait for the web element to be ready
+
+            :return: data in data context
+        """
+
+        element = self.actual_element
+        expandable_bw_elems = element.find_elements(By.CSS_SELECTOR, 'div.bandwidth-legend > div')
+        rtr = {}
+        for expandable_bw_elem in expandable_bw_elems:
+            bw_attribute_text = expandable_bw_elem.get_attribute('class')
+            key = bw_attribute_text.split('-')[-1].capitalize() # extract min/max from the class names
+            value = self.get_text(expandable_bw_elem.find_element(By.CSS_SELECTOR, "div > ucs-renderer")) 
+            rtr[key]=value
+        return rtr
+
+
+class AnTopologyExplorer(WebComponent):
+    """
+        an-topology-explorer  web component class definition
+
+        url: https://staging.starshipcloud.com/an/orchestration/an/workflow/workflow-definitions/new #TBD CHANGE LINK
+             Designer tab in create workflow.
+    """
+
+    @property
+    def canvas_context(self) -> CanvasContextMap:
+        """
+            return available table context
+            :return: table context dictionary.
+        """
+
+        if self._canvas_context is None:
+            self._canvas_context = {
+                "canvas": {
+                    self.parent_context: AnTopologyCanvasContext(self.web_element, common_info=self.common_info)
+                }
+            }
+        return self._canvas_context
+    
+    @property
+    def data_context(self) -> DataContextMap:
+        """
+            return available data 
+        """
+        # topology network utilization bandwidth details 
+        if self._data_context is None:
+            self._data_context = {} 
+            bw_expandable_card = self.shadow_root_element(self.web_element,"div.right > ucs-expandable-card")
+            if bw_expandable_card and bw_expandable_card.get_property("expanded"):
+                context = self.shadow_root_element(bw_expandable_card, 'span.UcsExpandableCard-title').text
+                self._data_context[context] = {
+                    self.parent_context: BandwidthDataContext(element=bw_expandable_card, common_info=self.common_info)}
+        return self._data_context
