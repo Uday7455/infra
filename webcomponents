@@ -1,0 +1,71 @@
+"""
+an-server-profile-assignment web component definition
+"""
+from qali.intersight.gui import util
+from qali.intersight.gui.model_util import ChildComponentsInfo, DataContextMap, DataDictContextList, WebElement
+from qali.intersight.gui.web_component import WebComponent
+
+
+class AnServerProfileAssignment(WebComponent):
+    """
+        an-server-profile-assignment web component class definition
+
+        url: https://staging.starshipcloud.com/an/infrastructure-service/an/policy/profiles/server/assign/
+    """
+
+    @property
+    def data_context(self) -> DataContextMap:
+        """
+            return available data context
+            :return: data context dictionary.
+        """
+        if self._data_context is None:
+            self._data_context = {}
+            element = self.shadow_root_element(self.web_element, 'div.content')
+
+            if element:
+                context = self.get_text(element).strip().split("\n")[0]
+
+                self._data_context[context] = {
+                    self.parent_context: DataDictContextList(
+                        self.web_element,
+                        common_info=self.common_info
+                    )
+                }
+
+        return self._data_context
+
+    def handle_child_components(self, element: WebElement) -> ChildComponentsInfo:
+        """
+            custom child components information to component manager.
+
+            :param element: reference web element
+            :return: custom child components information
+        """
+        child_components_info = ChildComponentsInfo([])
+        all_child_components = set(
+            util.get_child_shadow_host_elements(self.driver, self.web_element))
+        ucs_expand_elements = set(self.shadow_root_elements(
+            self.web_element, css_selector="ucs-expand"))
+        for ucs_expand_element in ucs_expand_elements:
+            all_child_components = all_child_components - \
+                set(util.get_child_shadow_elements(
+                    self.driver, ucs_expand_element))
+
+        remaining_children = all_child_components - ucs_expand_elements
+
+        # Get assignment title for path context
+        path_contexts = []
+        assignment_title_element = self.shadow_root_element(
+            self.web_element, "div.assignment-block div.assignment-title")
+        if assignment_title_element:
+            title = self.get_text(assignment_title_element).strip()
+            if title:
+                path_contexts = [title]
+
+        child_components_info.add(list(remaining_children), path_contexts=path_contexts)
+
+        if ucs_expand_elements:
+            child_components_info.add(list(ucs_expand_elements))
+
+        return child_components_info
