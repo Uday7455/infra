@@ -1,0 +1,1669 @@
+"""
+ucs data table web component definition
+"""
+# pylint: disable=too-many-public-methods
+import re
+import time
+from typing import Dict, List, Mapping, Optional, Tuple, Union
+
+from selenium.common import exceptions
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.remote.webdriver import WebDriver
+from selenium.webdriver.remote.webelement import WebElement
+
+from qali.intersight.gui import util
+from qali.intersight.gui.exceptions import ValueNotFound, ValueNotSet
+from qali.intersight.gui.model_util import ButtonContext, ChildComponentsInfo, ClickContextMap, TableContext
+from qali.intersight.gui.web_component import WebComponent
+from qali.intersight.gui.web_component.is_chips_editor import IsChipsEditorDataContextList
+from qali.intersight.gui.web_component.is_filter_drawer import (
+    FilterDrawerFormPropertiesContext,
+    FilterDrawerInputContext,
+)
+from qali.intersight.gui.web_component.ucs_dropdown_pro_max import UcsDropdownProMaxContext
+from qali.intersight.gui.web_component.ucs_input import UcsInputTextContext
+from qali.intersight.gui.web_component.ucs_pagination import UcsPaginationContext
+from qali.intersight.gui.web_component.ucs_tag_editor import UcsTagEditorContext
+from qali.intersight.gui.web_component.ucs_tooltip_host import UcsTooltipHostContext
+
+RePattern = getattr(re, "Pattern")
+
+
+class DataTableContext(TableContext):
+    """
+        Data table context class definition
+    """
+
+    ORDER_STR = [None, "ascent", "descent", "asc", "desc"]
+
+    def _get_pagination_context(self) -> Optional[UcsPaginationContext]:
+        element = self.actual_element
+        pagination = self.shadow_root_element(element, "ucs-pagination")
+        if not pagination:
+            return None
+        return UcsPaginationContext(pagination, common_info=self.common_info)
+
+    def _get_table_grid(self, timeout: int) -> WebElement:
+        """
+            return table data grid web element
+
+            :param timeout: time to wait for table to be loaded.
+            :return: table data grid web element
+
+        """
+
+        element = self.actual_element
+        wait_time_gen = util.wait_time.generator(self.START_WAIT_TIME,
+                                                 self.MAX_INTERVAL_TIME,
+                                                 timeout)
+
+        for i in wait_time_gen:
+            table_grid = self.shadow_root_element(
+                element, "div#container > div.UcsGrid[state='idle']")
+            if table_grid:
+                break
+            time.sleep(i)
+        else:
+            raise exceptions.NoSuchElementException("Not able to find element with locator"
+                                                    " div#container > div.UcsGrid[state='idle']")
+
+        return table_grid
+
+    def wait_table_loaded(self, timeout: int) -> None:
+        """
+            return wait until table is loaded
+
+            :param timeout: time to wait for table to be loaded.
+            :return: None
+
+        """
+        self._get_table_grid(timeout)
+
+    def _wait_table_move_to_update(self, timeout: float = 1.1) -> None:
+        """
+            wait for table to move to update state
+
+            :param timeout: time to wait for table to move to update state.
+                timeout in the product is 1 second for table to move to update,
+                aligning the timeout with the product, with a 0.1-second buffer.
+
+        """
+
+        element = self.actual_element
+        wait_time_gen = util.wait_time.generator(self.START_WAIT_TIME,
+                                                 self.MAX_INTERVAL_TIME,
+                                                 timeout)
+
+        for i in wait_time_gen:
+            table_grid = self.shadow_root_element(
+                element, "div#container > div.UcsGrid[state='update']")
+            if table_grid:
+                break
+            time.sleep(i)
+
+    def _is_hierarchical_table(self) -> bool:
+        """
+        Detect hierarchical ucs-data-table by host id matching hierarchicalTable.
+
+        :return: True if hierarchical tree table, else False.
+        """
+        host = self.actual_element
+        el_id = (host.get_attribute("id") or "").strip().lower()
+        return el_id == "hierarchicaltable"
+
+    def _has_unread_flag(self) -> bool:
+        """
+        Detect if table supports unread/read advisory status.
+
+        :return: True when host carries the data-has-unread attribute, else False.
+        """
+        host = self.actual_element
+        return host.get_attribute("data-has-unread") is not None
+
+    def _get_matched_column(self,
+                            column: Optional[str] = None,
+                            table_grid: Optional[WebElement] = None,
+                            timeout: Optional[int] = None) -> Tuple[int, WebElement]:
+        """
+            return column index and column web element that matched given column
+
+            :param column: column name to match
+            :param table_grid: table grid web element.
+            :param timeout: time to wait for table to be loaded.
+
+            :return: table grid web element
+
+        """
+
+        if table_grid is None:
+            table_grid = self._get_table_grid(timeout)
+
+        elements = table_grid.find_elements(
+            By.CSS_SELECTOR, "div#main div.UcsGrid-column.head")
+
+        # workaround for remove group element
+        elements = [ele for ele in elements if ele.get_attribute('class') != 'UcsGrid-column group head']
+
+        for index, element in enumerate(elements):
+            if column == element.text:
+                return index, element
+
+        raise ValueNotFound("Unable to find column {0}.  Available columns are {1}".format(
+            column, list(map(lambda x: x.text, elements))))
+
+    def __remove_start_end_quotes(self, text: str = "") -> str:
+        return re.sub(r"^(['\"])(.*)\1$", r"\2", text)
+
+    def __get_filter_widget_element(self, element: WebElement) -> Optional[WebElement]:
+        """
+            return filter widget element
+        """
+        return self.shadow_root_element(
+            element, "[data-test-id^='filter-widget']")
+
+    def __get_filter_widget_legacy_element(self, element: WebElement) -> Optional[WebElement]:
+        """
+            return filter widget legacy element
+        """
+        return self.shadow_root_element(
+            element, "is-filter-widget-legacy")
+
+    def __get_search_input_element(self, element: WebElement) -> Optional[WebElement]:
+        """
+            return search input element
+        """
+        return self.shadow_root_element(
+            element, "[data-test-id^='table:search']")
+
+    def __get_legacy_tag_editor_element(self, element: WebElement) -> Optional[WebElement]:
+        """
+            return legacy tag editor element
+        """
+        legacy_element = self.__get_filter_widget_legacy_element(element) or element
+
+        return self.shadow_root_element(
+            legacy_element, "div.GridHeader > div.GridHeader-search:not([style]) "
+            "ucs-tag-editor#filterWidget, "
+            "div.GridSubHeader > div.GridHeader-search:not([style]) "
+            "ucs-tag-editor#filterWidget"
+        )
+
+    def __convert_filter_str_dict(self, filter_str: str) -> Dict:
+        """
+            convert filter string to dictionary
+
+            :param filter_str: filter string to convert
+            :return: filter dictionary
+        """
+        filter_str = filter_str.strip()
+        if not filter_str:
+            raise ValueNotSet("filter value cannot be empty")
+        filter_fields = filter_str.split(":", 1)
+        if not len(filter_fields) == 2:
+            raise ValueNotSet("Filter string format should be key:value")
+        key, input_value = filter_fields
+        operator_pattern = r'^\s?(!=|eq|ne|[<>=]=?)\s(.*$)'
+        match_result = re.match(operator_pattern, input_value)
+        if match_result:
+            operator = match_result.group(1)
+            input_value = self.__remove_start_end_quotes(re.match(operator_pattern, input_value).group(2))
+        else:
+            operator = "contains"
+        return {"key": key, "operator": operator, "value": input_value.strip()}
+
+    def __convert_filters_dict_str(self, filters: List[Dict]) -> List[str]:
+        """
+            convert filtered dict values to string list
+
+            :param filters: filters to convert
+            :return: string list
+        """
+        filter_list = []
+        for filter_map in filters:
+            key = filter_map.get("key")
+            value = filter_map.get("value", '')
+            operator = filter_map.get("operator", '')
+            unit = filter_map.get("unit", '')
+
+            value = ", ".join(value) if isinstance(value, list) else value
+            operator = '' if operator == 'contains' else f"{operator} "
+            filter_list.append(f"{key}:{operator}{value}{unit}")
+        return filter_list
+
+    def __get_filter_dict(self, filter_str: Union[str, List[Union[str, Dict]], Dict]) -> List[Dict]:
+        """
+            return filter dictionary based on filter string
+
+            :param filter_str: filter string to set
+            :return: filter dictionary
+        """
+        filter_list = []
+        if isinstance(filter_str, str):
+            filter_list.append(self.__convert_filter_str_dict(filter_str))
+        elif isinstance(filter_str, list):
+            for filter_item in filter_str:
+                if isinstance(filter_item, str):
+                    filter_list.append(self.__convert_filter_str_dict(filter_item))
+                elif isinstance(filter_item, dict):
+                    filter_list.append(filter_item)
+        elif isinstance(filter_str, dict):
+            filter_list.append(filter_str)
+        if not filter_list:
+            raise ValueNotSet("filter_str must be either string, list or dictionary")
+        return filter_list
+
+    def __is_free_form_search(self, filter_str: Union[str, List, Dict]) -> bool:
+        """
+            check if filter string is free form search
+
+            :param filter_str: filter string to set
+            :return: True if filter string is free form search
+        """
+        return False if isinstance(filter_str, (list, dict)) else ":" not in filter_str
+
+    def column_headers(self,
+                       table_grid: Optional[WebElement] = None,
+                       timeout: Optional[int] = None) -> List[str]:
+        """
+            return column headers of the table
+
+            :param table_grid: table grid web element.
+            :param timeout: time to wait for table to be loaded.
+
+            :return: column headers of the table
+        """
+
+        if table_grid is None:
+            table_grid = self._get_table_grid(timeout)
+
+        elements = table_grid.find_elements(
+            By.CSS_SELECTOR, "div#main div.UcsGrid-column.head")
+
+        table_column_headers = []
+
+        grouped_headers = set()
+        for element in elements:
+            if element.id not in grouped_headers:
+                if "group" in element.get_attribute("class"):
+                    # handle group header
+                    group_header_text = element.find_element(By.CSS_SELECTOR, "div.UcsGrid-column-title").text
+                    child_columns = element.find_elements(By.CSS_SELECTOR, "div.UcsGrid-column.head")
+                    for column in child_columns:
+                        grouped_headers.add(column.id)
+                        table_column_headers.append(f"{group_header_text}.{column.text}")
+                else:
+                    # individual header
+                    table_column_headers.append(self.get_text(element))
+
+        return table_column_headers
+
+    def _get_row_read_status(self, table_grid: WebElement) -> List[bool]:
+        """
+            Determine the read status of each row in the current page.
+            A row is considered unread if it contains a blue dot indicator
+            (a small span styled as a circle with the accent color).
+
+            :param table_grid: table grid web element.
+            :return: list of booleans, True if the row has been read, False if unread.
+        """
+        return util.get_row_read_status(self.driver, table_grid)
+
+    def page_data(self,
+                  page: Union[int, str, None] = None,
+                  rows: Optional[List[int]] = None,
+                  columns: Optional[List[str]] = None,
+                  table_grid: Optional[WebElement] = None,
+                  column_headers: Optional[List[str]] = None,
+                  timeout: Optional[int] = None) -> List[Mapping[str, str]]:
+        """
+        Return one page of table rows as dicts keyed by column name.
+
+        :param page: page number to read, or None for the current page.
+        :param rows: row subset to read, or None for all rows on the page.
+        :param columns: column names to read, or None for all columns.
+        :param table_grid: optional cached grid element to avoid lookup.
+        :param column_headers: optional cached headers to avoid lookup.
+        :param timeout: seconds to wait for the grid to be ready.
+        :return: list of row dicts; hierarchical tables (id hierarchicalTable) add _visible_row_index,
+            _tree_depth, _tree_parent_row_index, and _tree_is_branch from the grid.
+        """
+
+        if page and self.page_number(timeout) != int(page):
+            self.set_page_number(page, timeout)
+
+        if table_grid is None:
+            table_grid = self._get_table_grid(timeout)
+
+        if column_headers is None:
+            column_headers = self.column_headers(table_grid, timeout)
+
+        table_body = table_grid.find_element(
+            By.CSS_SELECTOR, "div#main > div.UcsGrid-body")
+
+        if rows is None:
+            rows = []
+
+        if columns is None:
+            columns = []
+        else:
+            # convert columns requested into index
+            column_list = []
+            for index, header in enumerate(column_headers):
+                if header in columns:
+                    column_list.append(index)
+            columns = column_list
+
+        # for those computed table, there will be no pagination header and for those tables
+        # we cannot base on the grid idle state to determine if table is finished populating
+        # hence for now, we will wait for period of time to make sure the len of data doesn't change
+        # so we don't end up return partial table.
+        pagination_ctx = self._get_pagination_context()
+        is_pagination_hidden = pagination_ctx is None or pagination_ctx.is_hidden() is not None
+        hierarchical = self._is_hierarchical_table()
+        if is_pagination_hidden:
+            # no pagination
+            data, hierarchy = util.get_table_data(
+                self.driver, table_body, rows, columns, hierarchical)
+            max_interval = 0.2
+            wait_time_gen = util.wait_time.generator(self.START_WAIT_TIME,
+                                                     max_interval,
+                                                     0.7)
+
+            for i in wait_time_gen:
+                new_data, _ = util.get_table_data(
+                    self.driver, table_body, rows, columns, hierarchical)
+                if len(data) != len(new_data):
+                    raise ValueNotSet("table did not finish loading")
+                time.sleep(i)
+
+        else:
+            data, hierarchy = util.get_table_data(
+                self.driver, table_body, rows, columns, hierarchical)
+
+        table_data = []
+        for column_index, row_list in data.items():
+            column_name = column_headers[int(column_index)]
+            if len(table_data) == 0:
+                # initialize the rtr list map
+                for _ in row_list:
+                    table_data.append({})
+            for index, entry in enumerate(row_list):
+                table_data[index][column_name] = entry
+
+        # Enrich each row with read/unread status only for tables that support unread indicator.
+        include_read_status = self._has_unread_flag()
+        read_statuses = self._get_row_read_status(table_grid) if include_read_status else []
+        for index, row_map in enumerate(table_data):
+            if hierarchical:
+                row_map["_visible_row_index"] = str(index)
+                hi = hierarchy[index]
+                row_map["_tree_depth"] = hi["depth"]
+                row_map["_tree_parent_row_index"] = hi.get("parentRowIndex", "")
+                row_map["_tree_is_branch"] = hi.get("isBranch", "false")
+            if include_read_status:
+                if index < len(read_statuses):
+                    row_map["_is_read"] = read_statuses[index]
+                else:
+                    row_map["_is_read"] = True
+
+        return table_data
+
+    def all_data(self,
+                 columns: Optional[List[str]] = None,
+                 timeout: Optional[int] = None) -> List[Mapping[str, str]]:
+        """
+            return all page data of the table.
+
+            :param columns: table columns to retrieve the data from.  If None, all columns will be retrieved.
+            :param timeout: time to wait for table to be loaded.
+            :return: data of given page of the table
+
+        """
+
+        table_grid = self._get_table_grid(timeout)
+        column_headers = self.column_headers(table_grid, timeout)
+
+        if self.page_number(timeout) > 1:
+            self.first_page(timeout)
+
+        total_pages = self.total_pages(timeout)
+
+        table_data = []
+        for _ in range(1, total_pages):
+            for _ in range(5):
+                try:
+                    table_data.extend(self.page_data(columns=columns,
+                                                     column_headers=column_headers, timeout=timeout))
+                    break
+                except exceptions.StaleElementReferenceException:
+                    time.sleep(0.1)
+            self.next_page(timeout)
+
+        # read current page
+        for _ in range(5):
+            try:
+                table_data.extend(self.page_data(columns=columns,
+                                                 column_headers=column_headers, timeout=timeout))
+                break
+            except exceptions.StaleElementReferenceException:
+                time.sleep(0.1)
+        return table_data
+
+    def select_all(self, timeout: int) -> None:
+        """
+            select all rows
+
+            :param timeout: time to wait for table to be loaded.
+            :return: None
+
+        """
+        table_grid = self._get_table_grid(timeout)
+        checkbox = table_grid.find_element(
+            By.CSS_SELECTOR, "#left div.UcsGrid-cell.checkbox.head")
+
+        if checkbox.find_element(By.CSS_SELECTOR, "ucs-checkbox").get_attribute("checked") is not None:
+            # unselect and then reselect all
+            self.click_element(checkbox, timeout)
+        self.click_element(checkbox, timeout)
+
+    def unselect_all(self, all_pages, timeout: int) -> None:
+        """
+            unselect all rows for current page table
+
+            :param all_pages: whether to unselect all rowes in all page.
+            :param timeout: time to wait for table to be loaded.
+            :return: None
+        """
+
+        table_grid = self._get_table_grid(timeout)
+        if not all_pages:
+            checkbox = table_grid.find_element(
+                By.CSS_SELECTOR, "#left div.UcsGrid-cell.checkbox.head")
+
+            checkbox_element = checkbox.find_element(By.CSS_SELECTOR, "ucs-checkbox, ucs-radio")
+            if checkbox_element.tag_name == "ucs-checkbox":
+                if checkbox_element.get_attribute("checked") is None:
+                    # we will click and unclick to unselect all
+                    self.click_element(checkbox, timeout)
+                self.click_element(checkbox, timeout)
+            else:
+                # radio button
+                # button to unselect all for example, dashlet server details creation page.
+                unselect_link = self.shadow_root_element(self.actual_element, "ucs-button[data-test-id='unselectAll']")
+                self.click_element(unselect_link, timeout)
+        else:
+            # use unselect link to unselect entire table.
+            unselect_link = self.shadow_root_element(self.actual_element, "ucs-button[data-test-id='unselectAll']")
+            self.click_element(unselect_link, timeout)
+
+    def show_selected(self, timeout: int) -> bool:
+        """
+            show only selected rows
+
+            :param timeout: time to wait for table to be loaded.
+            :return: True if show selected is clicked.  False if table already in show selected state
+        """
+        self._get_table_grid(timeout)
+        show_selected_link = self.shadow_root_element(self.actual_element, "ucs-button[data-test-id='showSelected']")
+        if show_selected_link is None:
+            raise ValueNotFound("No row is selected.")
+
+        if "display: none" not in show_selected_link.get_attribute("style"):
+            self.click_element(show_selected_link, timeout)
+            return True
+        return False
+
+    def show_all(self, timeout: int) -> bool:
+        """
+            show all rows
+
+            :param timeout: time to wait for table to be loaded.
+            :return: True if show all is clicked. False if table already in show all state
+        """
+        self._get_table_grid(timeout)
+        show_buttons = self.shadow_root_elements(self.actual_element, "ucs-button[data-test-id='showAll']")
+        if len(show_buttons) == 0:
+            raise ValueNotFound("No row is selected.")
+
+        # show all button only get created after show selected is clicked
+        if show_buttons[-1].text == "Show All" and "display: none" not in show_buttons[-1].get_attribute("style"):
+            self.click_element(show_buttons[-1], timeout)
+            return True
+        return False
+
+    def get_matched_row_indices(self,
+                                row_info_list: List[Mapping[str, Union[str, RePattern]]],
+                                table_grid: Optional[WebElement] = None,
+                                timeout: Optional[int] = None) -> List[int]:
+        """
+            return list of row index that match criteria in row_info_list.
+            The row_info_list is list of criteria.  As long as the row match one of criteria, it will
+            be considered as match.  The criteria is a dictioanry with column name as key and desired matching value.
+            The matching value can be either string or regular expression
+
+            For example:
+
+            with row_info_list as [{Name: "abc"}, {Name: re.compile("^xyz[0-9]$")}],
+            It will return any row with Name = "abc" or Name starts with xyz following by 1 number.
+
+            :param row_info_list: list of matching criteria.
+            :param table_grid: table grid web element.  Provide the argument to improve process time.
+            :param timeout: time to wait for table to be loaded.
+
+            :return: list of matched row indices.
+        """
+        if table_grid is None:
+            table_grid = self._get_table_grid(timeout)
+
+        table_data = self.page_data(None, table_grid=table_grid, timeout=timeout)
+
+        rtr_list = []
+        for row_index, data_map in enumerate(table_data):
+            for row_info in row_info_list:
+                for key, value in row_info.items():
+                    data_value = data_map.get(key, None)
+                    if data_value is None:
+                        # key is not found
+                        break
+                    if isinstance(value, RePattern):
+                        if not value.search(data_value):
+                            # not match regex provided
+                            break
+                    elif value != data_value:
+                        # value not match
+                        break
+                else:
+                    # match all condition
+                    rtr_list.append(row_index)
+                    break
+        return rtr_list
+
+    def select_rows(self,
+                    row_indices: List[int],
+                    timeout: int) -> None:
+        """
+            select given row indices
+
+            :param row_indices: row indcies to select.
+            :param timeout: time to wait for table to be loaded.
+
+            :return: None
+        """
+
+        table_grid = self._get_table_grid(timeout)
+
+        checkbox_list = []
+        for row_index in row_indices:
+            checkbox = table_grid.find_element(
+                By.CSS_SELECTOR, "#left div.UcsGrid-column.checkbox.body > div:nth-child({0})".format(row_index + 1))
+            checkbox_list.append(checkbox)
+
+        wait_time_gen = util.wait_time.generator(self.START_WAIT_TIME,
+                                                 self.MAX_INTERVAL_TIME,
+                                                 self.CONTEXT_WAIT_TIME)
+        for i in wait_time_gen:
+            clicked = False
+            for checkbox in checkbox_list:
+                if checkbox.find_element(By.CSS_SELECTOR, "ucs-checkbox, ucs-radio").get_attribute("checked") is None:
+                    self.click_element(checkbox, timeout)
+                    clicked = True
+            else:
+                if not clicked:
+                    # no row is clicked, so we are done.
+                    break
+            time.sleep(i)
+        else:
+            raise ValueNotSet(f"Unable to select desired rows {row_indices}")
+
+    def selected_rows(self,
+                      timeout: int) -> List[int]:
+        """
+            return rows selected in current table page
+
+            :param timeout: time to wait for table to be loaded.
+
+            :return: list of rows selected
+        """
+
+        table_grid = self._get_table_grid(timeout)
+
+        checkbox_list = table_grid.find_elements(By.CSS_SELECTOR,
+                                                 "#left div.UcsGrid-column.checkbox.body > div")
+
+        row_indices = []
+        for index, checkbox in enumerate(checkbox_list):
+            if "selected" in checkbox.get_attribute("class"):
+                row_indices.append(index)
+
+        return row_indices
+
+    def unselect_rows(self,
+                      row_indices: List[int],
+                      timeout: int) -> None:
+        """
+            unselect given row indices
+
+            :param row_indices: row indices to unselect.
+            :param timeout: time to wait for table to be loaded.
+
+            :return: None
+        """
+        table_grid = self._get_table_grid(timeout)
+
+        checkbox_list = []
+        for row_index in row_indices:
+            checkbox = table_grid.find_element(
+                By.CSS_SELECTOR, "#left div.UcsGrid-column.checkbox.body > div:nth-child({0})".format(row_index + 1))
+            checkbox_list.append(checkbox)
+
+        wait_time_gen = util.wait_time.generator(self.START_WAIT_TIME,
+                                                 self.MAX_INTERVAL_TIME,
+                                                 self.CONTEXT_WAIT_TIME)
+        for i in wait_time_gen:
+            clicked = False
+            for checkbox in checkbox_list:
+                if checkbox.find_element(By.CSS_SELECTOR,
+                                         "ucs-checkbox, ucs-radio").get_attribute("checked") is not None:
+                    self.click_element(checkbox, timeout)
+                    clicked = True
+            else:
+                if not clicked:
+                    # no row is clicked, so we are done.
+                    break
+            time.sleep(i)
+        else:
+            raise ValueNotSet(f"Unable to select desired rows {row_indices}")
+
+    def checkbox_disabled_selected_rows(self,
+                                        timeout: int) -> List[int]:
+        """
+        https://staging.starshipcloud.com/an/system/an/settings/resourceGroups/65eada3469726531019e1b39
+            return rows with checkbox disabled and checked in current table page
+
+        :param timeout: time to wait for table to be loaded.
+
+        :return: list of rows disabled with checked
+        """
+
+        table_grid = self._get_table_grid(timeout)
+
+        ucs_tooltips = table_grid.find_elements(By.CSS_SELECTOR,
+                                                "#left div.UcsGrid-column.checkbox.body > ucs-tooltip-host")
+
+        row_indices = []
+        for index, tooltip in enumerate(ucs_tooltips):
+            if "disabled" in tooltip.get_attribute("class"):
+                checkbox = tooltip.find_element(By.CSS_SELECTOR, 'ucs-checkbox')
+                if checkbox.get_attribute('checked'):
+                    row_indices.append(index)
+
+        return row_indices
+
+    def sort_column(self,
+                    column: str,
+                    order: Optional[str],
+                    timeout: int) -> None:
+        """
+            sort give column with given order.
+
+
+            :param column: column name to be sorted.
+            :param order: desired order for sorting.  Possible values are [None, "ascent", "descent", "asc", "desc"]
+            :param timeout: time to wait for table to be loaded.
+
+            :return: None
+        """
+
+        if order:
+            order = order.lower()
+        if order not in self.ORDER_STR:
+            raise ValueNotSet(
+                "order must be one of the values:  {0}".format(self.ORDER_STR))
+
+        table_grid = self._get_table_grid(timeout)
+
+        _, column_element = self._get_matched_column(
+            column, table_grid, timeout)
+        # print("scroll column")
+        # util.element_location_scroll(self.driver, column_element)  # Scroll to bring the column into view
+        # self._wait_table_move_to_update()
+
+        if order in ["ascent", "asc"]:
+            order = "asc"
+        elif order in ["descent", "desc"]:
+            order = "desc"
+
+        class_attr = None
+        for _ in range(3):
+            element = column_element.find_element(
+                By.CSS_SELECTOR, "div.UcsGrid-sorter")
+            class_attr = element.get_attribute("class")
+            if order:
+                if order in class_attr:
+                    break
+            elif "asc" not in class_attr and "desc" not in class_attr:
+                break
+            try:
+                self.click_element(element, timeout)
+            except exceptions.ElementClickInterceptedException:
+                # If column to be sorted is not in view
+                util.element_location_scroll(self.driver, column_element)  # Scroll to bring the column into view
+
+        else:
+            raise ValueNotSet("Unable to sort column {0} with order {1}.  Current class attribute is {2}".format(
+                column, order, class_attr))
+        self._wait_table_move_to_update()
+
+    def set_search_input(
+        self, filter_str: str, timeout: int, filter_widget_element: Optional[WebElement] = None
+    ) -> None:
+        """
+            set search input for table
+
+            :param filter_str: filter string to set
+            :param timeout: time to wait for table to be loaded.
+
+            :return: None
+        """
+        element = self.actual_element
+        if filter_widget_element is None:
+            filter_widget_element = self.__get_filter_widget_element(element)
+        if filter_widget_element:
+            search_element = self.__get_search_input_element(filter_widget_element)
+            if not search_element:
+                raise ValueNotFound("Unable to find search input element.")
+            input_ctx = UcsInputTextContext(search_element, common_info=self.common_info)
+            input_ctx.input(filter_str, timeout)
+        else:
+            raise ValueNotFound("Unable to find filter widget element.")
+
+    def get_search_input(self, timeout: int, filter_widget_element: Optional[WebElement] = None) -> str:
+        """
+            get search input for table
+
+            :param timeout: time to wait for table to be loaded.
+
+            :return: search input for table
+        """
+        element = self.actual_element
+        if filter_widget_element is None:
+            filter_widget_element = self.__get_filter_widget_element(element)
+        if not filter_widget_element:
+            raise ValueNotFound("Unable to find filter widget element.")
+        search_element = self.__get_search_input_element(filter_widget_element)
+        if search_element:
+            input_ctx = UcsInputTextContext(search_element, common_info=self.common_info)
+            return input_ctx.value(timeout)
+        return ""
+
+    def set_filter(self,
+                   filter_str: Union[str, List[Union[str, Dict]], Dict],
+                   timeout: int) -> None:
+        """
+            set table filter
+
+            :param filter_str: filter string to set
+            :param timeout: time to wait for table to be loaded.
+
+            :return: None
+        """
+        # Wait for table to load first
+        _ = self._get_table_grid(timeout)
+        element = self.actual_element
+        filter_widget_element = self.__get_filter_widget_element(element)
+        if not filter_widget_element:
+            filter_element = self.__get_legacy_tag_editor_element(element)
+            if not filter_element:
+                raise ValueNotFound("Unable to find filter element.")
+            input_ctx = UcsTagEditorContext(
+                filter_element, common_info=self.common_info)
+            input_ctx.input(filter_str, timeout)
+        else:
+            if self.__is_free_form_search(filter_str):
+                self.set_search_input(filter_str, timeout, filter_widget_element)
+            else:
+                filter_dict = self.__get_filter_dict(filter_str)
+                filter_drawer = self.shadow_root_element(
+                    filter_widget_element, "is-filter-drawer")
+                if not filter_drawer:
+                    raise ValueNotFound("Unable to find filter drawer element.")
+                filter_btn_elm = filter_drawer.find_element(
+                    By.CSS_SELECTOR, "[data-test-id^='table:filter-btn']")
+                if not filter_btn_elm:
+                    raise ValueNotFound("Unable to find filter button.")
+
+                filter_click_ctx = ButtonContext(filter_btn_elm, common_info=self.common_info)
+                filter_click_ctx.click(timeout)
+                filter_drawer_ctx = FilterDrawerInputContext(filter_drawer, common_info=self.common_info)
+                filter_drawer_ctx.input(filter_dict, timeout)
+
+        self._wait_table_move_to_update()
+        self.wait_table_loaded(timeout)
+
+    def clear_filter(self,
+                     timeout: int,
+                     use_button: Optional[bool] = False) -> None:
+        """
+            clear table filter
+
+            :param timeout: time to wait for table to be loaded.
+            :param use_button: if True, use the 'X' button to clear filter.
+
+            :return: None
+        """
+        element = self.actual_element
+        filter_widget_element = self.__get_filter_widget_element(element)
+        if not filter_widget_element:
+            if use_button:
+                filter_element = self.__get_legacy_tag_editor_element(element)
+                if not filter_element:
+                    raise ValueNotFound("Unable to find filter element.")
+
+                clear_button_elem = self.shadow_root_element(filter_element, "div.Tags-clear > ucs-button")
+                if not clear_button_elem:
+                    raise ValueNotFound("Unable to find clear filter button.")
+                clear_button = ButtonContext(clear_button_elem, common_info=self.common_info)
+                clear_button.click(timeout=timeout)
+                # After clicking on the button, we send an empty filter to close the dropdown that follows
+
+            self.set_filter("", timeout)
+        else:
+            if self.get_search_input(timeout, filter_widget_element):
+                self.set_search_input("", timeout, filter_widget_element)
+            if len(self.get_filter(timeout)) > 0:
+                reset_button = self.shadow_root_element(filter_widget_element, "[data-test-id^='table:reset-all']")
+                if not reset_button:
+                    raise ValueNotFound("Unable to find reset button.")
+                reset_button_ctx = ButtonContext(reset_button, common_info=self.common_info)
+                reset_button_ctx.click(timeout)
+                time.sleep(1)
+
+    def get_filter(self,
+                   timeout: int, dict_list: Optional[bool] = False) -> List[Union[str, Dict]]:
+        """
+            get table filter current set to
+
+            :param timeout: time to wait for table to be loaded.
+
+            :return: filters set in the table
+        """
+        element = self.actual_element
+        filter_widget_element = self.__get_filter_widget_element(element)
+        filter_values = []
+        if not filter_widget_element:
+            filter_element = self.__get_legacy_tag_editor_element(element)
+            if not filter_element:
+                raise ValueNotFound("Unable to find filter element.")
+            input_ctx = UcsTagEditorContext(
+                filter_element, common_info=self.common_info)
+            filter_values = input_ctx.value(timeout)
+        else:
+            chips_editor_element = self.shadow_root_element(
+                filter_widget_element, "[data-test-id^='table:chips-editor']")
+            if not chips_editor_element:
+                self.common_info.log("Unable to find chips editor element.")
+                return []
+            chips_editor_ctx = IsChipsEditorDataContextList(chips_editor_element, common_info=self.common_info)
+            filter_values = chips_editor_ctx.values(timeout)
+            if not dict_list:
+                filter_values = self.__convert_filters_dict_str(filter_values)
+        return filter_values
+
+    def click_cell(self,
+                   row_index: int,
+                   column: str,
+                   timeout: int) -> None:
+        """
+            click table cell for given row index and column
+
+            :param row_index: row index of the table cell
+            :param column: column name of the table cell
+            :param timeout: time to wait for table to be loaded.
+
+            :return: None
+        """
+
+        table_grid = self._get_table_grid(timeout)
+
+        column_index, _ = self._get_matched_column(column, table_grid, timeout)
+
+        cell = table_grid.find_element(
+            By.CSS_SELECTOR,
+            "div#main div.UcsGrid-column.body:nth-child({0}) div.UcsGrid-cell.body:nth-child({1})".format(
+                column_index + 1, row_index + 1))
+
+        # check if there ucs-link, if yes, click on the link vs cell, since middle of cell may not be the link
+        try:
+            element = cell.find_element(
+                By.CSS_SELECTOR,
+                "ucs-link, div.renderer-hyper-link, div.u-link, ucs-icon.renderer-hyper-link, ucs-button")
+        except exceptions.NoSuchElementException:
+            element = cell
+
+        self.click_element(element, timeout)
+
+    def click_row_tree_toggle(self,
+                              row_index: int,
+                              timeout: int,
+                              expand: Optional[bool] = None) -> None:
+        """
+        Click the hierarchical table row tree caret (ucs:down-arrow in the first column).
+
+        :param row_index: visible row index in the first column (same as page_data).
+        :param timeout: seconds to wait for grid idle after the click.
+        :param expand: if True, click only when collapsed; if False, only when expanded;
+            if None, always click once (toggle).
+        :return: None.
+        :raises ValueNotFound: missing grid, bad row index, or row has no caret.
+        """
+        table_grid = self._get_table_grid(timeout)
+        table_body = table_grid.find_element(
+            By.CSS_SELECTOR, "div#main > div.UcsGrid-body")
+        hierarchical = self._is_hierarchical_table()
+        raw = util.get_table_tree_toggle(
+            self.driver, table_body, hierarchical, row_index)
+        icon_el, visible_count, code = raw[0], raw[1], raw[2]
+        expanded: Optional[bool] = None
+        if len(raw) > 3:
+            expanded = raw[3]  # True / False / null from script
+        if code == "no_columns":
+            raise ValueNotFound("Unable to find grid columns in table body.")
+        if code == "bad_index":
+            raise ValueNotFound(
+                "Row index {0} is out of range for visible rows (count={1}).".format(
+                    row_index, visible_count))
+        if code == "no_icon":
+            raise ValueNotFound(
+                "No ucs:down-arrow tree caret on visible row {0}.".format(row_index))
+        if expand is not None and expanded is not None:
+            want_open = bool(expand)
+            if want_open and expanded:
+                return
+            if not want_open and not expanded:
+                return
+        click_ctx = ButtonContext(icon_el, common_info=self.common_info)
+        click_ctx.click(timeout)
+        self._get_table_grid(timeout)
+
+    def hover_cell(self,
+                   row_index: int,
+                   column: str,
+                   timeout: int) -> str:
+        """
+            Get hover data for a cell of a given row index and column
+
+            :param row_index: row index of the table cell
+            :param column: column name of the table cell
+            :param timeout: time to wait for table to be loaded.
+
+            :return: None
+        """
+
+        table_grid = self._get_table_grid(timeout)
+
+        column_index, _ = self._get_matched_column(column, table_grid, timeout)
+
+        cell = table_grid.find_element(
+            By.CSS_SELECTOR,
+            "div#main div.UcsGrid-column.body:nth-child({0}) div.UcsGrid-cell.body:nth-child({1})".format(
+                column_index + 1, row_index + 1))
+
+        # check for ucs-tooltip-host's
+        # For Tags we can have multiple ucs-tooltip-host -> STARSHIP-11423
+        elements = cell.find_elements(By.CSS_SELECTOR, "ucs-tooltip-host")
+
+        # If ucs-tooltip-host is not present we will get empty list
+        # In that case lets keep the cell element
+        if not elements:
+            elements = [cell]
+
+        hover_strings = []
+        for element in elements:
+            ucs_tooltip_host_component = UcsTooltipHostContext(element=element)
+            hover_strings.append(ucs_tooltip_host_component.details(timeout=timeout))
+        return ",".join(hover_strings)
+
+    def action_on_row(self,
+                      action: str,
+                      row_index: int,
+                      timeout: int,
+                      hover: Optional[bool] = False) -> None:
+        """
+            perform given action for given row of table
+
+            :param action: action to perform on the table row.  Possible value can be found using
+                           self.action_on_row_choices method
+            :param row_index: row index to perform the action on
+            :param timeout: time to wait for table to be loaded.
+            :param hover: to hover over the action element
+
+            :return: None
+        """
+
+        table_grid = self._get_table_grid(timeout)
+        wait_time_gen = util.wait_time.generator(self.START_WAIT_TIME,
+                                                 self.MAX_INTERVAL_TIME,
+                                                 self.CONTEXT_WAIT_TIME)
+        exception = None
+        for wait_time in wait_time_gen:
+            self.common_info.log("trying to find the ucs-dropdown-pro-max element")
+            dropdown_element = None
+            button_element = None
+            icon_element = None
+            try:
+                dropdown_element = table_grid.find_element(
+                    By.CSS_SELECTOR, "div#right div.UcsGrid-cell.body:nth-child({0}) > ucs-dropdown-pro-max".
+                    format(row_index + 1))
+                self.common_info.log("found the ucs-dropdown-pro-max element!")
+                break
+            except exceptions.NoSuchElementException as exc:
+                exception = exc
+                try:
+                    self.common_info.log("ucs-dropdown-pro-max element not found in this attempt")
+                    self.common_info.log("Checking if ucs-button element is present (single button in actions)")
+                    icon_element = table_grid.find_element(
+                        By.CSS_SELECTOR,
+                        "div#right div.UcsGrid-cell.body:nth-child({0}) > ucs-button:not([icon='ucs:more'])".
+                        format(row_index + 1))
+                    break
+                except exceptions.NoSuchElementException as nse:
+                    self.common_info.log("ucs-button element not found in this attempt")
+                    exception = nse
+
+            try:
+                button_element = table_grid.find_element(
+                    By.CSS_SELECTOR, "div#right div.UcsGrid-cell.body:nth-child({0}) > ucs-button".
+                    format(row_index + 1))
+                self.common_info.log("found the ucs-button element!")
+                action_chains = ActionChains(self.driver)
+                action_chains.move_to_element(button_element).perform()
+            except exceptions.NoSuchElementException as exc:
+                self.common_info.log("ucs-button element not found in this attempt")
+                exception = exc
+
+            time.sleep(wait_time)
+        else:
+            raise exception
+
+        if dropdown_element:
+            select_ctx = UcsDropdownProMaxContext(
+                dropdown_element, common_info=self.common_info)
+            self.common_info.log("selecting the ucs-dropdown-pro-max element!")
+            if hover:
+                return select_ctx.get_choice_tooltip(action, timeout)
+
+            select_ctx.select(action, timeout)
+            self.common_info.log("select passed!")
+
+        if button_element or icon_element:
+            if button_element:
+                element_to_click = button_element
+            else:
+                element_to_click = icon_element
+            # This means only a single action is available
+            click_ctx = ButtonContext(element_to_click, common_info=self.common_info)
+            click_ctx.click(timeout)
+            self.common_info.log("button clicked!")
+
+    def action_on_row_choices(self,
+                              row_index: int,
+                              enabled: Optional[bool],
+                              timeout: int) -> List[str]:
+        """
+            return possible action choices for given row of table
+
+            :param row_index: row index to get action choices
+            :param enabled: if None, return all choices.  If True, return enabled choice only.  If False,
+                            return disabled choice only.
+            :param timeout: time to wait for table to be loaded.
+
+            :return: list of possible action choices
+        """
+
+        table_grid = self._get_table_grid(timeout)
+
+        wait_time_gen = util.wait_time.generator(self.START_WAIT_TIME,
+                                                 self.MAX_INTERVAL_TIME,
+                                                 self.CONTEXT_WAIT_TIME)
+        exception = None
+        for wait_time in wait_time_gen:
+            self.common_info.log("trying to find the ucs-dropdown-pro-max element")
+            dropdown_element = None
+            button_element = None
+            icon_element = None
+            try:
+                dropdown_element = table_grid.find_element(
+                    By.CSS_SELECTOR, "div#right div.UcsGrid-cell.body:nth-child({0}) > ucs-dropdown-pro-max".
+                    format(row_index + 1))
+                break
+            except exceptions.NoSuchElementException as excep:
+                exception = excep
+                try:
+                    self.common_info.log("ucs-dropdown-pro-max element not found in this attempt")
+                    self.common_info.log("Checking if ucs-button element is present (single button) in actions")
+                    icon_element = table_grid.find_element(
+                        By.CSS_SELECTOR,
+                        "div#right div.UcsGrid-cell.body:nth-child({0}) > ucs-button:not([icon='ucs:more'])".
+                        format(row_index + 1))
+                    break
+                except exceptions.NoSuchElementException as nse:
+                    self.common_info.log("ucs-button element not found in this attempt")
+                    exception = nse
+
+            try:
+                button_element = table_grid.find_element(
+                    By.CSS_SELECTOR, "div#right div.UcsGrid-cell.body:nth-child({0}) > ucs-button".
+                    format(row_index + 1))
+                action_chains = ActionChains(self.driver)
+                action_chains.move_to_element(button_element).perform()
+            except exceptions.NoSuchElementException as exc:
+                self.common_info.log("ucs-button element not found in this attempt")
+                exception = exc
+
+            time.sleep(wait_time)
+        else:
+            raise exception
+
+        if dropdown_element:
+            select_ctx = UcsDropdownProMaxContext(
+                dropdown_element, common_info=self.common_info)
+            return select_ctx.choices(enabled, timeout)
+        if icon_element:
+            return ['click']  # An icon found instead of action menu hence only one possibility of clicking it.
+        return []
+
+    def action_on_selected(self,
+                           action: str,
+                           use_footer: bool,
+                           timeout: int) -> None:
+        """
+            perform given action on selected row of the table
+
+            :param action: action to perform on selected row.  Possible value can be found using
+                           self.action_on_selected_choices method
+            :param use_footer: If True, trigger action from the bottom of the table.  Otherwise,
+                               trigger from the top of the table.
+            :param timeout: time to wait for table to be loaded.
+
+            :return: None
+        """
+        # make sure table is loaded
+        _ = self._get_table_grid(timeout)
+
+        element = self.actual_element
+
+        if not use_footer:
+            actions = self.shadow_root_element(
+                element, "div.GridHeader-actions")
+            if not actions:
+                raise ValueNotFound("Unable to table header action element.")
+            try:
+                actions_panel = actions.find_element(
+                    By.CSS_SELECTOR, "ucs-actions-panel")
+                actions = actions_panel
+            except exceptions.NoSuchElementException:
+                pass
+        else:
+            actions = self.shadow_root_element(
+                element, "div.GridFooter-actions, div.GridFooter > ucs-actions-panel")
+            if not actions:
+                raise ValueNotFound("Unable to table footer action element.")
+
+        if actions.tag_name == "ucs-actions-panel":
+            elements = self.shadow_root_elements(actions, "ucs-button")
+        else:
+            elements = actions.find_elements(By.CSS_SELECTOR, "ucs-button")
+
+        for element in elements:
+            choice = re.sub("^ucs:(isnd-)?", "icon:", element.get_attribute("icon"))
+            if not choice:
+                choice = element.get_attribute("title")
+            if choice == action:
+                self.click_element(element, timeout)
+                return
+
+        if actions.tag_name == "ucs-actions-panel":
+            elements = self.shadow_root_elements(
+                actions, "ucs-dropdown-pro-max")
+        else:
+            elements = actions.find_elements(
+                By.CSS_SELECTOR, "ucs-dropdown-pro-max")
+
+        if elements:
+            assert len(elements) == 1
+            select_ctx = UcsDropdownProMaxContext(
+                elements[0], common_info=self.common_info)
+            select_ctx.select(action, timeout)
+            return
+
+        raise ValueNotSet("Unable to find action {0}.  Available actions are {1}".format(
+            action, self.action_on_selected_choices(use_footer, None, timeout)))
+
+    def action_on_selected_choices(self,
+                                   use_footer: bool,
+                                   enabled: Optional[bool],
+                                   timeout: int) -> List[str]:
+        """
+            return action choices on selected row of the table
+
+            :param use_footer: If True, trigger action from the bottom of the table.  Otherwise,
+                               trigger from the top of the table.
+            :param enabled: if None, return all choices.  If True, return enabled choice only.  If False,
+                            return disabled choice only.
+            :param timeout: time to wait for table to be loaded.
+            :return: list of possible action choices
+        """
+
+        # make sure table is loaded
+        _ = self._get_table_grid(timeout)
+
+        element = self.actual_element
+        if not use_footer:
+            actions = self.shadow_root_element(
+                element, "div.GridHeader-actions")
+            if not actions:
+                raise ValueNotFound("Unable to table header action element.")
+
+            try:
+                actions_panel = actions.find_element(
+                    By.CSS_SELECTOR, "ucs-actions-panel")
+                actions = actions_panel
+            except exceptions.NoSuchElementException:
+                pass
+
+        else:
+            actions = self.shadow_root_element(
+                element, "div.GridFooter-actions, ucs-actions-panel")
+            if not actions:
+                raise ValueNotFound("Unable to table footer action element.")
+
+        choices = []
+
+        if actions.tag_name == "ucs-actions-panel":
+            elements = self.shadow_root_elements(
+                actions, "ucs-dropdown-pro-max")
+        else:
+            elements = actions.find_elements(
+                By.CSS_SELECTOR, "ucs-dropdown-pro-max")
+        exclude_buttons = set()
+        if elements:
+            assert len(elements) == 1
+            exclude_buttons = set(
+                map(lambda x: x.id, elements[0].find_elements(By.CSS_SELECTOR, "ucs-button")))
+            select_ctx = UcsDropdownProMaxContext(
+                elements[0], common_info=self.common_info)
+            choices.extend(select_ctx.choices(enabled, timeout))
+
+        if actions.tag_name == "ucs-actions-panel":
+            elements = self.shadow_root_elements(actions, "ucs-button")
+        else:
+            elements = actions.find_elements(By.CSS_SELECTOR, "ucs-button")
+
+        for element in elements:
+            if element.id not in exclude_buttons:
+                button_enabled = element.get_attribute("disabled") is None
+                if enabled is None or enabled == button_enabled:
+                    choice = re.sub("^ucs:(isnd-)?", "icon:", element.get_attribute("icon"))
+                    if not choice:
+                        choice = element.get_attribute("title")
+
+                    choices.append(choice)
+
+        return choices
+
+    def items_found(self, timeout: int) -> int:
+        """
+            return items found for the table
+
+            :param timeout: time to wait for table to be loaded.
+            :return: items found for the table
+        """
+
+        # make sure table is loaded
+        _ = self._get_table_grid(timeout)
+        element = self.actual_element
+        filter_widget_element = self.__get_filter_widget_element(element)
+        if not filter_widget_element:
+            item_found = self.shadow_root_element(
+                element, "div:not([hidden]).GridHeader "
+                "div.GridHeader-pagination-details")
+            if not item_found:
+                # check if pagination is hidden.  If yes, return 1
+                if self.shadow_root_element(element, "div.GridHeader[hidden] div.GridHeader-pagination, "
+                                            "div.GridHeader-pagination[hidden]") is not None:
+                    # pagination is hidden, so find number of rows by query current page data.
+                    # find number of rows
+                    return len(self.page_data(timeout=timeout))
+                raise ValueNotFound("Unable to find items found element.")
+        else:
+            # TO-DO: change it to data test id selector
+            item_found = self.shadow_root_element(filter_widget_element, "div.filter-widget span.total-count")
+            if not item_found:
+                raise ValueNotFound("Unable to find items found element.")
+
+        return int(re.search("[0-9]+", item_found.text).group())
+
+    def items_selected(self, timeout: int) -> Optional[int]:
+        """
+            return items selected for the table
+
+            :param timeout: time to wait for table to be loaded.
+            :return: items selected for the table
+        """
+
+        # make sure table is loaded
+        _ = self._get_table_grid(timeout)
+        element = self.actual_element
+        selected = self.shadow_root_element(element, "div[data-test-id='toolbarSelected']")
+        if selected:
+            if "display: none" in selected.get_attribute("style"):
+                # hidden, so return 0
+                return None
+            text = selected.find_element(By.CSS_SELECTOR, "span[data-test-id='selectedCount']").text
+            return int(re.search("([0-9]+)", text).group(1))
+
+        return None
+
+    def per_page(self, timeout: int) -> int:
+        """
+            return item per page for the table
+
+            :param timeout: time to wait for table to be loaded.
+            :return: item per page for the table
+        """
+
+        # make sure table is loaded
+        _ = self._get_table_grid(timeout)
+        pagination_ctx = self._get_pagination_context()
+        return pagination_ctx.get_per_page(timeout)
+
+    def set_per_page(self, page_size: Union[str, int], timeout: int) -> None:
+        """
+            set item per page for the table
+
+            :param page_size: item per page to be set
+            :param timeout: time to wait for table to be loaded.
+            :return: None
+        """
+        _ = self._get_table_grid(timeout)
+        data = self.page_data(timeout=timeout)
+        if len(data) == 0:
+            self.common_info.log("Table is empty. Skipping set_per_page action")
+            return
+        pagination_ctx = self._get_pagination_context()
+        pagination_ctx.set_per_page(page_size, timeout)
+
+        self._wait_table_move_to_update()
+
+    def per_page_choices(self, enabled: Optional[bool], timeout: int) -> List[str]:
+        """
+            return item per page choices for the table
+
+            :param enabled: if None, return all choices.  If True, return enabled choice only.  If False,
+                            return disabled choice only.
+            :param timeout: time to wait for table to be loaded.
+            :return: item per page choices
+        """
+
+        if enabled is False:
+            return []
+        _ = self._get_table_grid(timeout)
+
+        pagination_ctx = self._get_pagination_context()
+        return pagination_ctx.get_per_page_choices(enabled, timeout)
+
+    def first_page(self, timeout: int) -> None:
+        """
+            go to first page of the table
+
+            :param timeout: time to wait for table to be loaded.
+            :return: None
+        """
+        _ = self._get_table_grid(timeout)
+
+        pagination_ctx = self._get_pagination_context()
+        pagination_ctx.first_page(timeout)
+        self._wait_table_move_to_update()
+
+    def previous_page(self, timeout: int) -> None:
+        """
+            go to previous page of the table
+
+            :param timeout: time to wait for table to be loaded.
+            :return: None
+        """
+
+        _ = self._get_table_grid(timeout)
+        pagination_ctx = self._get_pagination_context()
+        pagination_ctx.previous_page(timeout)
+        self._wait_table_move_to_update()
+
+    def page_number(self, timeout: int) -> int:
+        """
+            return current page number of the table
+
+            :param timeout: time to wait for table to be loaded.
+            :return: current page number of the table
+        """
+        _ = self._get_table_grid(timeout)
+        pagination_ctx = self._get_pagination_context()
+        page_number = pagination_ctx.get_selected_page_number()
+        if not page_number:
+            if pagination_ctx.is_hidden() is not None:
+                # pagination is hidden, just return 1
+                return 1
+            # if we have 0 items in table
+            if self.items_found(timeout) == 0:
+                return 0
+            raise ValueNotFound("Unable to find page number element.")
+
+        # value = self.get_text(selected_page_element)
+        return page_number
+
+    def set_page_number(self, page: Union[int, str], timeout: int) -> None:
+        """
+            set page number of the table
+
+
+            :param page: page number to set to
+            :param timeout: time to wait for table to be loaded.
+            :return: None
+        """
+        _ = self._get_table_grid(timeout)
+        self.common_info.log("Deprecated: Setting page number from class member pageInputValue.")
+        pagination_ctx = self._get_pagination_context()
+        pagination_ctx.set_current_page_number(page)
+        self._wait_table_move_to_update()
+
+    def total_pages(self, timeout: int) -> int:
+        """
+            return total pages of the table
+
+            :param timeout: time to wait for table to be loaded.
+            :return: total pages of the table
+        """
+        _ = self._get_table_grid(timeout)
+        pagination_ctx = self._get_pagination_context()
+        return pagination_ctx.get_total_pages()
+
+    def next_page(self, timeout: int) -> None:
+        """
+            go to next page of the table
+
+            :param timeout: time to wait for table to be loaded.
+            :return: None
+        """
+
+        _ = self._get_table_grid(timeout)
+        pagination_ctx = self._get_pagination_context()
+        pagination_ctx.next_page(timeout)
+        self._wait_table_move_to_update()
+
+    def last_page(self, timeout: int) -> None:
+        """
+            go to last page of the table
+
+            :param timeout: time to wait for table to be loaded.
+            :return: None
+        """
+        _ = self._get_table_grid(timeout)
+        pagination_ctx = self._get_pagination_context()
+        pagination_ctx.last_page(timeout)
+        self._wait_table_move_to_update()
+
+    def get_search_attributes(self, timeout: int) -> List[str]:
+        """
+            Click on filter and fetch all search attributes from dropdown
+            :param timeout: time to wait for table to be loaded
+            :return : List of search attributes
+        """
+        _ = self._get_table_grid(timeout)
+        element = self.actual_element
+        filter_widget_element = self.__get_filter_widget_element(element)
+        filter_attributes = []
+        if not filter_widget_element:
+            ucs_tag_editor = self.shadow_root_element(
+                element, "ucs-tag-editor")
+            filter_element = self.shadow_root_element(
+                element, "ucs-tag-editor#filterWidget")
+            if not filter_element:
+                raise ValueNotFound("Unable to find filter element.")
+            self.click_element(filter_element, timeout)
+            ucs_dropdown_menu = self.shadow_root_element(
+                ucs_tag_editor, "div#tags-container > div#tags > div#tags-control > div#suggestions >ucs-dropdown-menu")
+            values = ucs_dropdown_menu.find_elements(By.CSS_SELECTOR, "ucs-dropdown-option")
+            filter_attributes = [self.get_text(i) for i in values]
+            action_chains = ActionChains(self.driver)
+            action_chains.send_keys(Keys.ESCAPE).perform()
+        else:
+            filter_drawer = self.shadow_root_element(
+                filter_widget_element, "is-filter-drawer")
+            if not filter_drawer:
+                raise ValueNotFound("Unable to find filter drawer element.")
+            filter_btn_elm = filter_drawer.find_element(
+                By.CSS_SELECTOR, "[data-test-id^='table:filter-btn']")
+            if not filter_btn_elm:
+                raise ValueNotFound("Unable to find filter button.")
+
+            filter_click_ctx = ButtonContext(filter_btn_elm, common_info=self.common_info)
+            filter_click_ctx.click(timeout)
+            filter_drawer_ctx = FilterDrawerFormPropertiesContext(filter_drawer, common_info=self.common_info)
+            filter_attributes = list(filter(lambda list: list != "Tags", filter_drawer_ctx.values(timeout)))
+        return filter_attributes
+
+    def add_custom_tab(self, custom_name=None, timeout=None) -> None:
+        """
+        click on the plus button in table header
+
+        :param custom_name: if custom_name is None ,default value will be saved else custom_name will be saved
+        :param timeout: time to wait for table to be loaded.
+        :return: None
+        """
+        _ = self._get_table_grid(timeout)
+        element = self.actual_element
+        table_header = self.shadow_root_element(element, "ucs-data-table-header")
+        button = self.shadow_root_element(
+            table_header, "ucs-icon.create-icon")
+        if not button:
+            raise ValueNotFound("Unable to find ucs plus icon element.")
+        self.click_element(button, timeout)
+        ucs_data_table_setting_element = self.shadow_root_element(element, "ucs-data-table-settings")
+        ucs_modal_element = self.shadow_root_element(ucs_data_table_setting_element, "ucs-modal")
+        # custom tab name
+        name_element = ucs_modal_element.find_element(By.CSS_SELECTOR, "div.body ucs-input[ref='nameInput']")
+        custom_name_input_ctx = UcsInputTextContext(name_element, common_info=self.common_info)
+        if custom_name is not None:
+            custom_name_input_ctx.input(custom_name, timeout)
+        footer_buttons = ucs_modal_element.find_elements(By.CSS_SELECTOR, "div.footer ucs-button")
+        for footer_button in footer_buttons:
+            if footer_button.text == 'Add':
+                self.click_element(footer_button, timeout)
+                break
+        self._wait_table_move_to_update()
+
+
+class UcsDataTable(WebComponent):
+    """
+        ucs data table web component class definition
+
+        url: table base component.  Use in many pages.  See unit test for specific page usage
+    """
+
+    @property
+    def path_contexts(self) -> List[str]:
+        """
+            return path contexts of the web components
+
+            :return: return path contexts of the web components.
+        """
+        return ["Table"]
+
+    @property
+    def click_context(self) -> ClickContextMap:
+        """
+            return path contexts of the web components
+            :return: return path contexts of the web components.
+        """
+        if self._click_context is None:
+            self._click_context = {}
+            parent_context = self.parent_context_plus(self.path_contexts)
+            setting = self.shadow_root_element(
+                self.web_element,
+                "ucs-icon[data-test-id^='table-column-settings'], ucs-button#settingsButton"
+            )
+            if setting:
+                self._click_context["icon:setting"] = {
+                    parent_context: ButtonContext(setting, common_info=self.common_info)}
+
+            export_btn = self.shadow_root_element(
+                self.web_element,
+                "ucs-button[data-action='export'], ucs-button.GridHeader-export"
+            )
+            if export_btn:
+                self._click_context["icon:export"] = {
+                    parent_context: ButtonContext(export_btn, common_info=self.common_info)}
+
+            expand_btn = self.shadow_root_element(
+                self.web_element, "ucs-button[data-test-id='expandAllButton']")
+            if expand_btn is not None:
+                label = self.get_text(expand_btn)
+                self._click_context[label] = {
+                    parent_context: ButtonContext(
+                        expand_btn, common_info=self.common_info)}
+        return self._click_context
+
+    @property
+    def table_context(self) -> Mapping[str, Mapping[str, TableContext]]:
+        """
+            return available select context
+            :return: select context dictionary.
+        """
+        if self._table_context is None:
+            if "hidden" in self.web_element.get_attribute("class"):
+                # hidden table
+                self._table_context = {}
+            else:
+                if self.parent_context:
+                    context, parent_context = self.parent_context_as_name
+                else:
+                    context = self.parent_context
+                    parent_context = None
+                self._table_context = {
+                    context: {parent_context: DataTableContext(self.web_element, common_info=self.common_info)}}
+        return self._table_context
+
+    def handle_child_components(self, element: WebElement) -> ChildComponentsInfo:
+        """
+            custom child components information to component manager.
+
+            :param element: reference web element
+            :return: custom child components information
+        """
+        # pass header, widget, header pop up for further processing.
+        widget_elements = self.shadow_root_elements(element, "ucs-model-crud-attention-widget,"
+                                                             "ucs-data-table-header,"
+                                                             "ucs-data-table-settings,"
+                                                             "[data-test-id^='filter-widget']")
+        return ChildComponentsInfo(widget_elements)
