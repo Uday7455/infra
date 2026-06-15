@@ -1,0 +1,189 @@
+"""
+an-sp-details web component definition
+"""
+import time
+from typing import Any, List, Mapping
+
+from selenium.common.exceptions import NoSuchElementException
+from selenium.webdriver.common.by import By
+from selenium.webdriver.remote.webelement import WebElement
+
+from qali.intersight.gui import util
+from qali.intersight.gui.model_util import DataContextMap, DataDictContext
+from qali.intersight.gui.util import element_location_scroll
+from qali.intersight.gui.web_component import WebComponent
+
+
+class AnSpPolicyDetailsDataContext(DataDictContext):
+    """
+    an-sp-details Data Context
+    """
+
+    def _extract_property(self, property_element: WebElement):
+        '''
+            Private recursive method to extract configuration details
+
+            :param property_element: div.UcsPolicyFormPreviewGroup-property element
+
+            :return: dict containing configuration details
+        '''
+
+        wait_time_gen = util.wait_time.generator(self.START_WAIT_TIME,
+                                                 self.MAX_INTERVAL_TIME,
+                                                 5)
+        for i in wait_time_gen:
+            try:
+                keyelement = property_element.find_element(
+                    By.CSS_SELECTOR, "div.UcsPolicyFormPreviewGroup-property-key")
+                if keyelement:
+                    key = self.get_text(keyelement)
+                    break
+            except NoSuchElementException:
+                time.sleep(i)
+        else:
+            return {}
+
+        try:
+            value = property_element.find_element(
+                By.CSS_SELECTOR, "div.UcsPolicyFormPreviewGroup-property-value, \
+                    div.UcsPolicyFormPreviewGroup-property-description").text
+        except NoSuchElementException:
+            value = '-'
+        return {key: value}
+
+    def _extract_group_property(self, group_property_element: WebElement):
+        '''
+            Private recursive method to extract configuration details
+
+            :param group_property_element: div.UcsPolicyFormPreviewGroup-group-property element
+
+            :return: dict containing configuration details
+        '''
+        property_elements = group_property_element.find_elements(
+            By.CSS_SELECTOR, "div.UcsPolicyFormPreviewGroup-property")
+        rtr = {}
+        for property_element in property_elements:
+            rtr = {**rtr, **self._extract_property(property_element)}
+        return rtr
+
+    def _extract_repeater_property(self, repeater_property_element: WebElement):
+        '''
+            Private recursive method to extract configuration details
+
+            :param group_property_element: div.UcsPolicyFormPreviewGroup-group-property element
+
+            :return: dict containing configuration details
+        '''
+        title = self.get_text(repeater_property_element.find_element(
+            By.CSS_SELECTOR, "div.UcsPolicyFormPreviewGroup-repeater-property-title"))
+        group_property_elements = repeater_property_element.find_elements(
+            By.CSS_SELECTOR, "div.UcsPolicyFormPreviewGroup-group-property")
+        rtr = {}
+        rtr[title] = {}
+        for group_property_element in group_property_elements:
+            rtr[title] = {**rtr[title], **self._extract_group_property(group_property_element)}
+        return rtr
+
+    def _extract_policy_details_container_elements(self, policy_details_container_elements: List[WebElement]):
+        policy_details_dict = {}
+        for container_element in policy_details_container_elements:
+            element_location_scroll(self.driver, container_element)
+
+            if 'UcsPolicyFormPreviewGroup-expandable' in container_element.get_attribute('class'):
+                policy_details_dict = {**policy_details_dict, **self._extract_repeater_property(container_element)}
+
+            if 'UcsPolicyFormPreviewGroup-property' in container_element.get_attribute('class'):
+                policy_details_dict = {**policy_details_dict, **self._extract_property(container_element)}
+
+            if 'UcsPolicyFormPreviewGroup-repeater-property' in container_element.get_attribute('class'):
+                policy_details_dict = {**policy_details_dict, **self._extract_repeater_property(container_element)}
+
+            if 'UcsPolicyFormPreviewGroup-group-property' in container_element.get_attribute('class'):
+                # Chassis Profile, Power Policy Details
+                child_container_elements = container_element.find_elements(By.XPATH, "*")
+                policy_details_dict = {**policy_details_dict, **
+                                       self._extract_policy_details_container_elements(child_container_elements)}
+
+            if 'UcsPolicyFormPreviewGroup-state-property' in container_element.get_attribute('class'):
+                try:
+                    child_container_elements = container_element.find_elements(By.XPATH, "*")
+                    title = container_element.find_element(
+                        By.CSS_SELECTOR, "div.UcsPolicyFormPreviewGroup-grid-title").text
+                    policy_details_dict[title] = self._extract_policy_details_container_elements(
+                        child_container_elements)
+                except NoSuchElementException:
+                    # .update() to merge results and allow the loop to move on to the next sibling (Timezone).
+                    policy_details_dict.update(
+                        self._extract_policy_details_container_elements(child_container_elements))
+
+        return policy_details_dict
+
+    def values(self, timeout: int) -> Mapping[str, Any]:
+        """
+            return data in data context
+
+            :param timeout: time to wait for the web element to be ready
+
+            :return: data in data context
+        """
+        # This component fetches large amounts of data from the UI. To reduce memory usage, we capture the UI code
+        # coverage and that will clear the buffer. STARSHIP-11652
+        util.capture_ui_coverage_data()
+
+        element = self.actual_element
+        rtr = {}
+        ucs_policy_form_preview = self.shadow_root_element(element, 'ucs-policy-form-preview')
+
+        general_container = self.shadow_root_element(ucs_policy_form_preview, "div#container > div.General")
+        general_container_elements = general_container.find_elements(By.XPATH, "*")
+        general_dict = {}
+        for container_element in general_container_elements:
+            # Add handle as necessary
+            if 'UcsPolicyFormPreviewGroup-property' in container_element.get_attribute('class'):
+                general_dict = {**general_dict, **self._extract_property(container_element)}
+
+        expand_button = self.shadow_root_element(
+            ucs_policy_form_preview, "div#container > div.expandButton > div.expander")
+        if expand_button and self.get_text(expand_button) == 'Expand All':
+            # Click the expand button to show the policy details
+            self.click_element(expand_button, timeout=timeout)
+            time.sleep(0.3)
+        policy_details_container = self.shadow_root_element(
+            ucs_policy_form_preview, "div#container > div.UcsPolicyFormPreviewGroup:not(.General)")
+        policy_details_container_elements = policy_details_container.find_elements(By.XPATH, "*")
+        policy_details_dict = self._extract_policy_details_container_elements(policy_details_container_elements)
+
+        # Using hard coded values since the hierarcy does not allow us to find the title assocaited with the
+        # corresponding div.UcsPolicyFormPreviewGroup
+        rtr['General'] = general_dict
+        rtr['Policy Details'] = policy_details_dict
+        return rtr
+
+
+class AnSpPolicyDetails(WebComponent):
+    """
+
+        an-sp-details web component class definition
+
+        url: Domain Profiles Details Page, preview vlan/vsan policy 
+
+    """
+
+    @property
+    def data_context(self) -> DataContextMap:
+        """
+            return available data context             
+            :return: data context dictionary.
+        """
+        if self._data_context is None:
+            self._data_context = {}
+            try:
+                context = self.shadow_root_element_text(self.web_element, "div.u-detail-page-title")
+                content_container = self.shadow_root_element(self.web_element, "div.u-detail-page-content")
+                content = content_container.find_element(By.XPATH, "*")
+                self._data_context[context] = {self.parent_context: AnSpPolicyDetailsDataContext(
+                    element=content, common_info=self.common_info)}
+            except NoSuchElementException:
+                pass
+
+        return self._data_context
